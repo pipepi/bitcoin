@@ -1,4 +1,4 @@
-// Copyright (c) 2011-2017 The Bitcoin Core developers
+// Copyright (c) 2011-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -8,11 +8,16 @@
 #include <net_processing.h> // For CNodeStateStats
 #include <net.h>
 
+#include <memory>
+
 #include <QAbstractTableModel>
 #include <QStringList>
 
-class ClientModel;
 class PeerTablePriv;
+
+namespace interfaces {
+class Node;
+}
 
 QT_BEGIN_NAMESPACE
 class QTimer;
@@ -45,7 +50,7 @@ class PeerTableModel : public QAbstractTableModel
     Q_OBJECT
 
 public:
-    explicit PeerTableModel(ClientModel *parent = 0);
+    explicit PeerTableModel(interfaces::Node& node, QObject* parent);
     ~PeerTableModel();
     const CNodeCombinedStats *getNodeStats(int idx);
     int getRowByNodeId(NodeId nodeid);
@@ -76,7 +81,7 @@ public Q_SLOTS:
     void refresh();
 
 private:
-    ClientModel *clientModel;
+    interfaces::Node& m_node;
     QStringList columns;
     std::unique_ptr<PeerTablePriv> priv;
     QTimer *timer;
