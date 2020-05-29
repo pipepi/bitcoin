@@ -59,6 +59,25 @@
 #define MICRO 0.000001
 #define MILLI 0.001
 
+/**
+ * An extra transaction can be added to a package, as long as it only has one
+ * ancestor and is no larger than this. Not really any reason to make this
+ * configurable as it doesn't materially change DoS parameters.
+ */
+static const unsigned int EXTRA_DESCENDANT_TX_SIZE_LIMIT = 10000;
+/** Maximum kilobytes for transactions to store for processing during reorg */
+static const unsigned int MAX_DISCONNECTED_TX_POOL_SIZE = 20000;
+/** The pre-allocation chunk size for blk?????.dat files (since 0.8) */
+static const unsigned int BLOCKFILE_CHUNK_SIZE = 0x1000000; // 16 MiB
+/** The pre-allocation chunk size for rev?????.dat files (since 0.8) */
+static const unsigned int UNDOFILE_CHUNK_SIZE = 0x100000; // 1 MiB
+/** Time to wait (in seconds) between writing blocks/block index to disk. */
+static const unsigned int DATABASE_WRITE_INTERVAL = 60 * 60;
+/** Time to wait (in seconds) between flushing chainstate to disk. */
+static const unsigned int DATABASE_FLUSH_INTERVAL = 24 * 60 * 60;
+/** Maximum age of our tip in seconds for us to be considered current for fee estimation */
+static const int64_t MAX_FEE_ESTIMATION_TIP_AGE = 3 * 60 * 60;
+
 bool CBlockIndexWorkComparator::operator()(const CBlockIndex *pa, const CBlockIndex *pb) const {
     // First sort by most total work, ...
     if (pa->nChainWork > pb->nChainWork) return false;
@@ -177,8 +196,8 @@ CBlockIndex* FindForkInGlobalIndex(const CChain& chain, const CBlockLocator& loc
 std::unique_ptr<CBlockTreeDB> pblocktree;
 
 // See definition for documentation
-static void FindFilesToPruneManual(std::set<int>& setFilesToPrune, int nManualPruneHeight);
-static void FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPruneAfterHeight);
+static void FindFilesToPruneManual(ChainstateManager& chainman, std::set<int>& setFilesToPrune, int nManualPruneHeight);
+static void FindFilesToPrune(ChainstateManager& chainman, std::set<int>& setFilesToPrune, uint64_t nPruneAfterHeight);
 bool CheckInputScripts(const CTransaction& tx, TxValidationState &state, const CCoinsViewCache &inputs, unsigned int flags, bool cacheSigStore, bool cacheFullScriptStore, PrecomputedTransactionData& txdata, std::vector<CScriptCheck> *pvChecks = nullptr);
 static FILE* OpenUndoFile(const FlatFilePos &pos, bool fReadOnly = false);
 static FlatFileSeq BlockFileSeq();
@@ -1632,14 +1651,15 @@ bool UndoReadFromDisk(CBlockUndo& blockundo, const CBlockIndex* pindex)
 }
 
 /** Abort with a message */
+// TODO: AbortNode() should take bilingual_str userMessage parameter.
 static bool AbortNode(const std::string& strMessage, const std::string& userMessage = "", unsigned int prefix = 0)
 {
     SetMiscWarning(strMessage);
     LogPrintf("*** %s\n", strMessage);
     if (!userMessage.empty()) {
-        uiInterface.ThreadSafeMessageBox(userMessage, "", CClientUIInterface::MSG_ERROR | prefix);
+        uiInterface.ThreadSafeMessageBox(Untranslated(userMessage), "", CClientUIInterface::MSG_ERROR | prefix);
     } else {
-        uiInterface.ThreadSafeMessageBox(_("Error: A fatal internal error occurred, see debug.log for details").translated, "", CClientUIInterface::MSG_ERROR | CClientUIInterface::MSG_NOPREFIX);
+        uiInterface.ThreadSafeMessageBox(_("Error: A fatal internal error occurred, see debug.log for details"), "", CClientUIInterface::MSG_ERROR | CClientUIInterface::MSG_NOPREFIX);
     }
     StartShutdown();
     return false;
@@ -1676,10 +1696,11 @@ int ApplyTxInUndo(Coin&& undo, CCoinsViewCache& view, const COutPoint& out)
             return DISCONNECT_FAILED; // adding output for transaction without known metadata
         }
     }
-    // The potential_overwrite parameter to AddCoin is only allowed to be false if we know for
-    // sure that the coin did not already exist in the cache. As we have queried for that above
-    // using HaveCoin, we don't need to guess. When fClean is false, a coin already existed and
-    // it is an overwrite.
+    // If the coin already exists as an unspent coin in the cache, then the
+    // possible_overwrite parameter to AddCoin must be set to true. We have
+    // already checked whether an unspent coin exists above using HaveCoin, so
+    // we don't need to guess. When fClean is false, an unspent coin already
+    // existed and it is an overwrite.
     view.AddCoin(out, std::move(undo), !fClean);
 
     return fClean ? DISCONNECT_OK : DISCONNECT_UNCLEAN;
@@ -2259,13 +2280,13 @@ bool CChainState::FlushStateToDisk(
         LOCK(cs_LastBlockFile);
         if (fPruneMode && (fCheckForPruning || nManualPruneHeight > 0) && !fReindex) {
             if (nManualPruneHeight > 0) {
-                LOG_TIME_MILLIS("find files to prune (manual)", BCLog::BENCH);
+                LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune (manual)", BCLog::BENCH);
 
-                FindFilesToPruneManual(setFilesToPrune, nManualPruneHeight);
+                FindFilesToPruneManual(g_chainman, setFilesToPrune, nManualPruneHeight);
             } else {
-                LOG_TIME_MILLIS("find files to prune", BCLog::BENCH);
+                LOG_TIME_MILLIS_WITH_CATEGORY("find files to prune", BCLog::BENCH);
 
-                FindFilesToPrune(setFilesToPrune, chainparams.PruneAfterHeight());
+                FindFilesToPrune(g_chainman, setFilesToPrune, chainparams.PruneAfterHeight());
                 fCheckForPruning = false;
             }
             if (!setFilesToPrune.empty()) {
@@ -2301,7 +2322,7 @@ bool CChainState::FlushStateToDisk(
                 return AbortNode(state, "Disk space is too low!", _("Error: Disk space is too low!").translated, CClientUIInterface::MSG_NOPREFIX);
             }
             {
-                LOG_TIME_MILLIS("write block and undo data to disk", BCLog::BENCH);
+                LOG_TIME_MILLIS_WITH_CATEGORY("write block and undo data to disk", BCLog::BENCH);
 
                 // First make sure all block and undo data is flushed to disk.
                 FlushBlockFile();
@@ -2309,7 +2330,7 @@ bool CChainState::FlushStateToDisk(
 
             // Then update all block file information (which may refer to block and undo files).
             {
-                LOG_TIME_MILLIS("write block index to disk", BCLog::BENCH);
+                LOG_TIME_MILLIS_WITH_CATEGORY("write block index to disk", BCLog::BENCH);
 
                 std::vector<std::pair<int, const CBlockFileInfo*> > vFiles;
                 vFiles.reserve(setDirtyFileInfo.size());
@@ -2329,7 +2350,7 @@ bool CChainState::FlushStateToDisk(
             }
             // Finally remove any pruned files
             if (fFlushForPrune) {
-                LOG_TIME_MILLIS("unlink pruned files", BCLog::BENCH);
+                LOG_TIME_MILLIS_WITH_CATEGORY("unlink pruned files", BCLog::BENCH);
 
                 UnlinkPrunedFiles(setFilesToPrune);
             }
@@ -2779,6 +2800,13 @@ bool CChainState::ActivateBestChainStep(BlockValidationState& state, const CChai
     return true;
 }
 
+static SynchronizationState GetSynchronizationState(bool init)
+{
+    if (!init) return SynchronizationState::POST_INIT;
+    if (::fReindex) return SynchronizationState::INIT_REINDEX;
+    return SynchronizationState::INIT_DOWNLOAD;
+}
+
 static bool NotifyHeaderTip() LOCKS_EXCLUDED(cs_main) {
     bool fNotify = false;
     bool fInitialBlockDownload = false;
@@ -2796,7 +2824,7 @@ static bool NotifyHeaderTip() LOCKS_EXCLUDED(cs_main) {
     }
     // Send block tip changed notifications without cs_main
     if (fNotify) {
-        uiInterface.NotifyHeaderTip(fInitialBlockDownload, pindexHeader);
+        uiInterface.NotifyHeaderTip(GetSynchronizationState(fInitialBlockDownload), pindexHeader);
     }
     return fNotify;
 }
@@ -2885,7 +2913,7 @@ bool CChainState::ActivateBestChain(BlockValidationState &state, const CChainPar
                 GetMainSignals().UpdatedBlockTip(pindexNewTip, pindexFork, fInitialDownload);
 
                 // Always notify the UI if a new block tip was connected
-                uiInterface.NotifyBlockTip(fInitialDownload, pindexNewTip);
+                uiInterface.NotifyBlockTip(GetSynchronizationState(fInitialDownload), pindexNewTip);
             }
         }
         // When we reach this point, we switched to a new tip (stored in pindexNewTip).
@@ -3076,7 +3104,7 @@ bool CChainState::InvalidateBlock(BlockValidationState& state, const CChainParam
 
     // Only notify about a new block tip if the active chain was modified.
     if (pindex_was_in_chain) {
-        uiInterface.NotifyBlockTip(IsInitialBlockDownload(), to_mark_failed->pprev);
+        uiInterface.NotifyBlockTip(GetSynchronizationState(IsInitialBlockDownload()), to_mark_failed->pprev);
     }
     return true;
 }
@@ -3366,7 +3394,14 @@ int GetWitnessCommitmentIndex(const CBlock& block)
     int commitpos = -1;
     if (!block.vtx.empty()) {
         for (size_t o = 0; o < block.vtx[0]->vout.size(); o++) {
-            if (block.vtx[0]->vout[o].scriptPubKey.size() >= 38 && block.vtx[0]->vout[o].scriptPubKey[0] == OP_RETURN && block.vtx[0]->vout[o].scriptPubKey[1] == 0x24 && block.vtx[0]->vout[o].scriptPubKey[2] == 0xaa && block.vtx[0]->vout[o].scriptPubKey[3] == 0x21 && block.vtx[0]->vout[o].scriptPubKey[4] == 0xa9 && block.vtx[0]->vout[o].scriptPubKey[5] == 0xed) {
+            const CTxOut& vout = block.vtx[0]->vout[o];
+            if (vout.scriptPubKey.size() >= MINIMUM_WITNESS_COMMITMENT &&
+                vout.scriptPubKey[0] == OP_RETURN &&
+                vout.scriptPubKey[1] == 0x24 &&
+                vout.scriptPubKey[2] == 0xaa &&
+                vout.scriptPubKey[3] == 0x21 &&
+                vout.scriptPubKey[4] == 0xa9 &&
+                vout.scriptPubKey[5] == 0xed) {
                 commitpos = o;
             }
         }
@@ -3397,7 +3432,7 @@ std::vector<unsigned char> GenerateCoinbaseCommitment(CBlock& block, const CBloc
             CHash256().Write(witnessroot.begin(), 32).Write(ret.data(), 32).Finalize(witnessroot.begin());
             CTxOut out;
             out.nValue = 0;
-            out.scriptPubKey.resize(38);
+            out.scriptPubKey.resize(MINIMUM_WITNESS_COMMITMENT);
             out.scriptPubKey[0] = OP_RETURN;
             out.scriptPubKey[1] = 0x24;
             out.scriptPubKey[2] = 0xaa;
@@ -3656,13 +3691,14 @@ bool BlockManager::AcceptBlockHeader(const CBlockHeader& block, BlockValidationS
 }
 
 // Exposed wrapper for AcceptBlockHeader
-bool ProcessNewBlockHeaders(const std::vector<CBlockHeader>& headers, BlockValidationState& state, const CChainParams& chainparams, const CBlockIndex** ppindex)
+bool ChainstateManager::ProcessNewBlockHeaders(const std::vector<CBlockHeader>& headers, BlockValidationState& state, const CChainParams& chainparams, const CBlockIndex** ppindex)
 {
+    AssertLockNotHeld(cs_main);
     {
         LOCK(cs_main);
         for (const CBlockHeader& header : headers) {
             CBlockIndex *pindex = nullptr; // Use a temp pindex instead of ppindex to avoid a const_cast
-            bool accepted = g_chainman.m_blockman.AcceptBlockHeader(
+            bool accepted = m_blockman.AcceptBlockHeader(
                 header, state, chainparams, &pindex);
             ::ChainstateActive().CheckBlockIndex(chainparams.GetConsensus());
 
@@ -3784,7 +3820,7 @@ bool CChainState::AcceptBlock(const std::shared_ptr<const CBlock>& pblock, Block
     return true;
 }
 
-bool ProcessNewBlock(const CChainParams& chainparams, const std::shared_ptr<const CBlock> pblock, bool fForceProcessing, bool *fNewBlock)
+bool ChainstateManager::ProcessNewBlock(const CChainParams& chainparams, const std::shared_ptr<const CBlock> pblock, bool fForceProcessing, bool* fNewBlock)
 {
     AssertLockNotHeld(cs_main);
 
@@ -3860,12 +3896,12 @@ uint64_t CalculateCurrentUsage()
     return retval;
 }
 
-/* Prune a block file (modify associated database entries)*/
-void PruneOneBlockFile(const int fileNumber)
+void ChainstateManager::PruneOneBlockFile(const int fileNumber)
 {
+    AssertLockHeld(cs_main);
     LOCK(cs_LastBlockFile);
 
-    for (const auto& entry : g_chainman.BlockIndex()) {
+    for (const auto& entry : m_blockman.m_block_index) {
         CBlockIndex* pindex = entry.second;
         if (pindex->nFile == fileNumber) {
             pindex->nStatus &= ~BLOCK_HAVE_DATA;
@@ -3879,12 +3915,12 @@ void PruneOneBlockFile(const int fileNumber)
             // to be downloaded again in order to consider its chain, at which
             // point it would be considered as a candidate for
             // m_blocks_unlinked or setBlockIndexCandidates.
-            auto range = g_chainman.m_blockman.m_blocks_unlinked.equal_range(pindex->pprev);
+            auto range = m_blockman.m_blocks_unlinked.equal_range(pindex->pprev);
             while (range.first != range.second) {
                 std::multimap<CBlockIndex *, CBlockIndex *>::iterator _it = range.first;
                 range.first++;
                 if (_it->second == pindex) {
-                    g_chainman.m_blockman.m_blocks_unlinked.erase(_it);
+                    m_blockman.m_blocks_unlinked.erase(_it);
                 }
             }
         }
@@ -3906,7 +3942,7 @@ void UnlinkPrunedFiles(const std::set<int>& setFilesToPrune)
 }
 
 /* Calculate the block/rev files to delete based on height specified by user with RPC command pruneblockchain */
-static void FindFilesToPruneManual(std::set<int>& setFilesToPrune, int nManualPruneHeight)
+static void FindFilesToPruneManual(ChainstateManager& chainman, std::set<int>& setFilesToPrune, int nManualPruneHeight)
 {
     assert(fPruneMode && nManualPruneHeight > 0);
 
@@ -3920,7 +3956,7 @@ static void FindFilesToPruneManual(std::set<int>& setFilesToPrune, int nManualPr
     for (int fileNumber = 0; fileNumber < nLastBlockFile; fileNumber++) {
         if (vinfoBlockFile[fileNumber].nSize == 0 || vinfoBlockFile[fileNumber].nHeightLast > nLastBlockWeCanPrune)
             continue;
-        PruneOneBlockFile(fileNumber);
+        chainman.PruneOneBlockFile(fileNumber);
         setFilesToPrune.insert(fileNumber);
         count++;
     }
@@ -3953,7 +3989,7 @@ void PruneBlockFilesManual(int nManualPruneHeight)
  *
  * @param[out]   setFilesToPrune   The set of file indices that can be unlinked will be returned
  */
-static void FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPruneAfterHeight)
+static void FindFilesToPrune(ChainstateManager& chainman, std::set<int>& setFilesToPrune, uint64_t nPruneAfterHeight)
 {
     LOCK2(cs_main, cs_LastBlockFile);
     if (::ChainActive().Tip() == nullptr || nPruneTarget == 0) {
@@ -3995,7 +4031,7 @@ static void FindFilesToPrune(std::set<int>& setFilesToPrune, uint64_t nPruneAfte
             if (vinfoBlockFile[fileNumber].nHeightLast > nLastBlockWeCanPrune)
                 continue;
 
-            PruneOneBlockFile(fileNumber);
+            chainman.PruneOneBlockFile(fileNumber);
             // Queue up the files for removal
             setFilesToPrune.insert(fileNumber);
             nCurrentUsage -= nBytesToPrune;
@@ -4119,9 +4155,9 @@ void BlockManager::Unload() {
     m_block_index.clear();
 }
 
-bool static LoadBlockIndexDB(const CChainParams& chainparams) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
+bool static LoadBlockIndexDB(ChainstateManager& chainman, const CChainParams& chainparams) EXCLUSIVE_LOCKS_REQUIRED(cs_main)
 {
-    if (!g_chainman.m_blockman.LoadBlockIndex(
+    if (!chainman.m_blockman.LoadBlockIndex(
             chainparams.GetConsensus(), *pblocktree,
             ::ChainstateActive().setBlockIndexCandidates)) {
         return false;
@@ -4147,8 +4183,7 @@ bool static LoadBlockIndexDB(const CChainParams& chainparams) EXCLUSIVE_LOCKS_RE
     // Check presence of blk files
     LogPrintf("Checking all blk files are present...\n");
     std::set<int> setBlkDataFiles;
-    for (const std::pair<const uint256, CBlockIndex*>& item : g_chainman.BlockIndex())
-    {
+    for (const std::pair<const uint256, CBlockIndex*>& item : chainman.BlockIndex()) {
         CBlockIndex* pindex = item.second;
         if (pindex->nStatus & BLOCK_HAVE_DATA) {
             setBlkDataFiles.insert(pindex->nFile);
@@ -4565,14 +4600,15 @@ void UnloadBlockIndex()
     fHavePruned = false;
 }
 
-bool LoadBlockIndex(const CChainParams& chainparams)
+bool ChainstateManager::LoadBlockIndex(const CChainParams& chainparams)
 {
+    AssertLockHeld(cs_main);
     // Load block index from databases
     bool needs_init = fReindex;
     if (!fReindex) {
-        bool ret = LoadBlockIndexDB(chainparams);
+        bool ret = LoadBlockIndexDB(*this, chainparams);
         if (!ret) return false;
-        needs_init = g_chainman.m_blockman.m_block_index.empty();
+        needs_init = m_blockman.m_block_index.empty();
     }
 
     if (needs_init) {
@@ -4617,7 +4653,7 @@ bool LoadGenesisBlock(const CChainParams& chainparams)
     return ::ChainstateActive().LoadGenesisBlock(chainparams);
 }
 
-bool LoadExternalBlockFile(const CChainParams& chainparams, FILE* fileIn, FlatFilePos *dbp)
+void LoadExternalBlockFile(const CChainParams& chainparams, FILE* fileIn, FlatFilePos* dbp)
 {
     // Map of disk positions for blocks with unknown parent (only used for reindex)
     static std::multimap<uint256, FlatFilePos> mapBlocksUnknownParent;
@@ -4629,7 +4665,7 @@ bool LoadExternalBlockFile(const CChainParams& chainparams, FILE* fileIn, FlatFi
         CBufferedFile blkdat(fileIn, 2*MAX_BLOCK_SERIALIZED_SIZE, MAX_BLOCK_SERIALIZED_SIZE+8, SER_DISK, CLIENT_VERSION);
         uint64_t nRewind = blkdat.GetPos();
         while (!blkdat.eof()) {
-            boost::this_thread::interruption_point();
+            if (ShutdownRequested()) return;
 
             blkdat.SetPos(nRewind);
             nRewind++; // start one byte further next time, in case of failure
@@ -4734,9 +4770,7 @@ bool LoadExternalBlockFile(const CChainParams& chainparams, FILE* fileIn, FlatFi
     } catch (const std::runtime_error& e) {
         AbortNode(std::string("System error: ") + e.what());
     }
-    if (nLoaded > 0)
-        LogPrintf("Loaded %i blocks from external file in %dms\n", nLoaded, GetTimeMillis() - nStart);
-    return nLoaded > 0;
+    LogPrintf("Loaded %i blocks from external file in %dms\n", nLoaded, GetTimeMillis() - nStart);
 }
 
 void CChainState::CheckBlockIndex(const Consensus::Params& consensusParams)
@@ -4978,6 +5012,7 @@ bool LoadMempool(CTxMemPool& pool)
     int64_t expired = 0;
     int64_t failed = 0;
     int64_t already_there = 0;
+    int64_t unbroadcast = 0;
     int64_t nNow = GetTime();
 
     try {
@@ -5031,12 +5066,21 @@ bool LoadMempool(CTxMemPool& pool)
         for (const auto& i : mapDeltas) {
             pool.PrioritiseTransaction(i.first, i.second);
         }
+
+        std::set<uint256> unbroadcast_txids;
+        file >> unbroadcast_txids;
+        unbroadcast = unbroadcast_txids.size();
+
+        for (const auto& txid : unbroadcast_txids) {
+            pool.AddUnbroadcastTx(txid);
+        }
+
     } catch (const std::exception& e) {
         LogPrintf("Failed to deserialize mempool data on disk: %s. Continuing anyway.\n", e.what());
         return false;
     }
 
-    LogPrintf("Imported mempool transactions from disk: %i succeeded, %i failed, %i expired, %i already there\n", count, failed, expired, already_there);
+    LogPrintf("Imported mempool transactions from disk: %i succeeded, %i failed, %i expired, %i already there, %i waiting for initial broadcast\n", count, failed, expired, already_there, unbroadcast);
     return true;
 }
 
@@ -5046,6 +5090,7 @@ bool DumpMempool(const CTxMemPool& pool)
 
     std::map<uint256, CAmount> mapDeltas;
     std::vector<TxMempoolInfo> vinfo;
+    std::set<uint256> unbroadcast_txids;
 
     static Mutex dump_mutex;
     LOCK(dump_mutex);
@@ -5056,6 +5101,7 @@ bool DumpMempool(const CTxMemPool& pool)
             mapDeltas[i.first] = i.second;
         }
         vinfo = pool.infoAll();
+        unbroadcast_txids = pool.GetUnbroadcastTxs();
     }
 
     int64_t mid = GetTimeMicros();
@@ -5080,6 +5126,10 @@ bool DumpMempool(const CTxMemPool& pool)
         }
 
         file << mapDeltas;
+
+        LogPrintf("Writing %d unbroadcast transactions to disk.\n", unbroadcast_txids.size());
+        file << unbroadcast_txids;
+
         if (!FileCommit(file.Get()))
             throw std::runtime_error("FileCommit failed");
         file.fclose();

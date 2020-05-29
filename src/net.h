@@ -21,8 +21,8 @@
 #include <random.h>
 #include <streams.h>
 #include <sync.h>
-#include <uint256.h>
 #include <threadinterrupt.h>
+#include <uint256.h>
 
 #include <atomic>
 #include <deque>
@@ -39,22 +39,17 @@
 class CScheduler;
 class CNode;
 class BanMan;
+struct bilingual_str;
 
 /** Default for -whitelistrelay. */
 static const bool DEFAULT_WHITELISTRELAY = true;
 /** Default for -whitelistforcerelay. */
 static const bool DEFAULT_WHITELISTFORCERELAY = false;
 
-/** Time between pings automatically sent out for latency probing and keepalive (in seconds). */
-static const int PING_INTERVAL = 2 * 60;
 /** Time after which to disconnect, after waiting for a ping response (or inactivity). */
 static const int TIMEOUT_INTERVAL = 20 * 60;
 /** Run the feeler connection loop once every 2 minutes or 120 seconds. **/
 static const int FEELER_INTERVAL = 120;
-/** The maximum number of entries in an 'inv' protocol message */
-static const unsigned int MAX_INV_SZ = 50000;
-/** The maximum number of entries in a locator */
-static const unsigned int MAX_LOCATOR_SZ = 101;
 /** The maximum number of new addresses to accumulate before announcing. */
 static const unsigned int MAX_ADDR_TO_SEND = 1000;
 /** Maximum length of incoming protocol messages (no message over 4 MB is currently acceptable). */
@@ -67,6 +62,8 @@ static const int MAX_OUTBOUND_FULL_RELAY_CONNECTIONS = 8;
 static const int MAX_ADDNODE_CONNECTIONS = 8;
 /** Maximum number of block-relay-only outgoing connections */
 static const int MAX_BLOCKS_ONLY_CONNECTIONS = 2;
+/** Maximum number of feeler connections */
+static const int MAX_FEELER_CONNECTIONS = 1;
 /** -listen default */
 static const bool DEFAULT_LISTEN = true;
 /** -upnp default */
@@ -340,7 +337,7 @@ private:
         NetPermissionFlags m_permissions;
     };
 
-    bool BindListenPort(const CService& bindAddr, std::string& strError, NetPermissionFlags permissions);
+    bool BindListenPort(const CService& bindAddr, bilingual_str& strError, NetPermissionFlags permissions);
     bool Bind(const CService& addr, unsigned int flags, NetPermissionFlags permissions);
     bool InitBinds(const std::vector<CService>& binds, const std::vector<NetWhitebindPermissions>& whiteBinds);
     void ThreadOpenAddedConnections();
@@ -457,7 +454,7 @@ private:
     const uint64_t nSeed0, nSeed1;
 
     /** flag for waking the message processor. */
-    bool fMsgProcWake;
+    bool fMsgProcWake GUARDED_BY(mutexMsgProc);
 
     std::condition_variable condMsgProc;
     Mutex mutexMsgProc;

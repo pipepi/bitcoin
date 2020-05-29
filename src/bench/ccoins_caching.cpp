@@ -18,6 +18,9 @@
 // (https://github.com/bitcoin/bitcoin/issues/7883#issuecomment-224807484)
 static void CCoinsCaching(benchmark::State& state)
 {
+    const ECCVerifyHandle verify_handle;
+    ECC_Start();
+
     FillableSigningProvider keystore;
     CCoinsView coinsDummy;
     CCoinsViewCache coins(&coinsDummy);
@@ -44,9 +47,8 @@ static void CCoinsCaching(benchmark::State& state)
     while (state.KeepRunning()) {
         bool success = AreInputsStandard(tx_1, coins);
         assert(success);
-        CAmount value = coins.GetValueIn(tx_1);
-        assert(value == (50 + 21 + 22) * COIN);
     }
+    ECC_Stop();
 }
 
 BENCHMARK(CCoinsCaching, 170 * 1000);

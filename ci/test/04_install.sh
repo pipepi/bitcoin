@@ -18,7 +18,7 @@ if [ "$TRAVIS_OS_NAME" == "osx" ]; then
   ${CI_RETRY_EXE} pip3 install $PIP_PACKAGES
 fi
 
-mkdir -p "${BASE_SCRATCH_DIR}"
+# Create folders that are mounted into the docker
 mkdir -p "${CCACHE_DIR}"
 mkdir -p "${PREVIOUS_RELEASES_DIR}"
 
@@ -26,7 +26,7 @@ export ASAN_OPTIONS="detect_stack_use_after_return=1:check_initialization_order=
 export LSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/lsan"
 export TSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/tsan:log_path=${BASE_SCRATCH_DIR}/sanitizer-output/tsan"
 export UBSAN_OPTIONS="suppressions=${BASE_ROOT_DIR}/test/sanitizer_suppressions/ubsan:print_stacktrace=1:halt_on_error=1:report_error_type=1"
-env | grep -E '^(BITCOIN_CONFIG|BASE_|QEMU_|CCACHE_|LC_ALL|BOOST_TEST_RANDOM|CONFIG_SHELL|(ASAN|LSAN|TSAN|UBSAN)_OPTIONS|TEST_PREVIOUS_RELEASES|PREVIOUS_RELEASES_DIR)' | tee /tmp/env
+env | grep -E '^(BITCOIN_CONFIG|BASE_|QEMU_|CCACHE_|LC_ALL|BOOST_TEST_RANDOM|DEBIAN_FRONTEND|CONFIG_SHELL|(ASAN|LSAN|TSAN|UBSAN)_OPTIONS|PREVIOUS_RELEASES_DIR)' | tee /tmp/env
 if [[ $HOST = *-mingw32 ]]; then
   DOCKER_ADMIN="--cap-add SYS_ADMIN"
 elif [[ $BITCOIN_CONFIG = *--with-sanitizers=*address* ]]; then # If ran with (ASan + LSan), Docker needs access to ptrace (https://github.com/google/sanitizers/issues/764)
@@ -58,6 +58,7 @@ else
     bash -c "export PATH=$BASE_SCRATCH_DIR/bins/:\$PATH && cd $P_CI_DIR && $*"
   }
 fi
+export -f DOCKER_EXEC
 
 if [ -n "$DPKG_ADD_ARCH" ]; then
   DOCKER_EXEC dpkg --add-architecture "$DPKG_ADD_ARCH"

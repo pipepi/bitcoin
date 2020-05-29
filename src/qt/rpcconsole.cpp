@@ -24,23 +24,21 @@
 #include <univalue.h>
 
 #ifdef ENABLE_WALLET
-#include <db_cxx.h>
+#include <wallet/db.h>
 #include <wallet/wallet.h>
 #endif
 
 #include <QKeyEvent>
 #include <QMenu>
 #include <QMessageBox>
-#include <QScrollBar>
 #include <QScreen>
+#include <QScrollBar>
 #include <QSettings>
+#include <QString>
+#include <QStringList>
 #include <QTime>
 #include <QTimer>
-#include <QStringList>
 
-// TODO: add a scrollback limit, as there is currently none
-// TODO: make it possible to filter out categories (esp debug messages when implemented)
-// TODO: receive errors and debug messages through ClientModel
 
 const int CONSOLE_HISTORY = 50;
 const int INITIAL_TRAFFIC_GRAPH_MINS = 30;
@@ -115,8 +113,8 @@ class QtRPCTimerInterface: public RPCTimerInterface
 {
 public:
     ~QtRPCTimerInterface() {}
-    const char *Name() { return "Qt"; }
-    RPCTimerBase* NewTimer(std::function<void()>& func, int64_t millis)
+    const char *Name() override { return "Qt"; }
+    RPCTimerBase* NewTimer(std::function<void()>& func, int64_t millis) override
     {
         return new QtRPCTimerBase(func, millis);
     }
@@ -480,7 +478,7 @@ RPCConsole::RPCConsole(interfaces::Node& node, const PlatformStyle *_platformSty
 
     // set library version labels
 #ifdef ENABLE_WALLET
-    ui->berkeleyDBVersion->setText(DbEnv::version(nullptr, nullptr, nullptr));
+    ui->berkeleyDBVersion->setText(QString::fromStdString(BerkeleyDatabaseVersion()));
 #else
     ui->label_berkeleyDBVersion->hide();
     ui->berkeleyDBVersion->hide();
@@ -498,6 +496,8 @@ RPCConsole::RPCConsole(interfaces::Node& node, const PlatformStyle *_platformSty
 
     consoleFontSize = settings.value(fontSizeSettingsKey, QFontInfo(QFont()).pointSize()).toInt();
     clear();
+
+    GUIUtil::handleCloseWindowShortcut(this);
 }
 
 RPCConsole::~RPCConsole()

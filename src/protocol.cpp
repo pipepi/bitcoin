@@ -40,6 +40,10 @@ const char *SENDCMPCT="sendcmpct";
 const char *CMPCTBLOCK="cmpctblock";
 const char *GETBLOCKTXN="getblocktxn";
 const char *BLOCKTXN="blocktxn";
+const char *GETCFHEADERS="getcfheaders";
+const char *CFHEADERS="cfheaders";
+const char *GETCFCHECKPT="getcfcheckpt";
+const char *CFCHECKPT="cfcheckpt";
 } // namespace NetMsgType
 
 /** All known message types. Keep this in the same order as the list of
@@ -71,6 +75,10 @@ const static std::string allNetMessageTypes[] = {
     NetMsgType::CMPCTBLOCK,
     NetMsgType::GETBLOCKTXN,
     NetMsgType::BLOCKTXN,
+    NetMsgType::GETCFHEADERS,
+    NetMsgType::CFHEADERS,
+    NetMsgType::GETCFCHECKPT,
+    NetMsgType::CFCHECKPT,
 };
 const static std::vector<std::string> allNetMessageTypesVec(allNetMessageTypes, allNetMessageTypes+ARRAYLEN(allNetMessageTypes));
 
@@ -141,24 +149,6 @@ ServiceFlags GetDesirableServiceFlags(ServiceFlags services) {
 
 void SetServiceFlagsIBDCache(bool state) {
     g_initial_block_download_completed = state;
-}
-
-
-CAddress::CAddress() : CService()
-{
-    Init();
-}
-
-CAddress::CAddress(CService ipIn, ServiceFlags nServicesIn) : CService(ipIn)
-{
-    Init();
-    nServices = nServicesIn;
-}
-
-void CAddress::Init()
-{
-    nServices = NODE_NONE;
-    nTime = 100000000;
 }
 
 CInv::CInv()

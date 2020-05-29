@@ -35,7 +35,7 @@ public:
     }
 
 protected:
-    bool filterAcceptsRow(int row, const QModelIndex& parent) const
+    bool filterAcceptsRow(int row, const QModelIndex& parent) const override
     {
         auto model = sourceModel();
         auto label = model->index(row, AddressTableModel::Label, parent);
@@ -136,6 +136,8 @@ AddressBookPage::AddressBookPage(const PlatformStyle *platformStyle, Mode _mode,
     connect(ui->tableView, &QWidget::customContextMenuRequested, this, &AddressBookPage::contextualMenu);
 
     connect(ui->closeButton, &QPushButton::clicked, this, &QDialog::accept);
+
+    GUIUtil::handleCloseWindowShortcut(this);
 }
 
 AddressBookPage::~AddressBookPage()

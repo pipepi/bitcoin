@@ -15,6 +15,7 @@
 #include <script/descriptor.h>
 #include <util/check.h>
 #include <util/message.h> // For MessageSign(), MessageVerify()
+#include <util/ref.h>
 #include <util/strencodings.h>
 #include <util/system.h>
 
@@ -366,8 +367,8 @@ static UniValue setmocktime(const JSONRPCRequest& request)
     RPCTypeCheck(request.params, {UniValue::VNUM});
     int64_t time = request.params[0].get_int64();
     SetMockTime(time);
-    if (g_rpc_node) {
-        for (const auto& chain_client : g_rpc_node->chain_clients) {
+    if (request.context.Has<NodeContext>()) {
+        for (const auto& chain_client : request.context.Get<NodeContext>().chain_clients) {
             chain_client->setMockTime(time);
         }
     }
@@ -398,9 +399,10 @@ static UniValue mockscheduler(const JSONRPCRequest& request)
     }
 
     // protect against null pointer dereference
-    CHECK_NONFATAL(g_rpc_node);
-    CHECK_NONFATAL(g_rpc_node->scheduler);
-    g_rpc_node->scheduler->MockForward(std::chrono::seconds(delta_seconds));
+    CHECK_NONFATAL(request.context.Has<NodeContext>());
+    NodeContext& node = request.context.Get<NodeContext>();
+    CHECK_NONFATAL(node.scheduler);
+    node.scheduler->MockForward(std::chrono::seconds(delta_seconds));
 
     return NullUniValue;
 }
@@ -516,7 +518,7 @@ UniValue logging(const JSONRPCRequest& request)
             "When called with arguments, adds or removes categories from debug logging and return the lists above.\n"
             "The arguments are evaluated in order \"include\", \"exclude\".\n"
             "If an item is both included and excluded, it will thus end up being excluded.\n"
-            "The valid logging categories are: " + ListLogCategories() + "\n"
+            "The valid logging categories are: " + LogInstance().LogCategoriesString() + "\n"
             "In addition, the following are available as category names with special meanings:\n"
             "  - \"all\",  \"1\" : represent all logging categories.\n"
             "  - \"none\", \"0\" : even if other logging categories are specified, ignore all of them.\n"
@@ -568,8 +570,7 @@ UniValue logging(const JSONRPCRequest& request)
     }
 
     UniValue result(UniValue::VOBJ);
-    std::vector<CLogCategoryActive> vLogCatActive = ListActiveLogCategories();
-    for (const auto& logCatActive : vLogCatActive) {
+    for (const auto& logCatActive : LogInstance().LogCategoriesList()) {
         result.pushKV(logCatActive.category, logCatActive.active);
     }
 

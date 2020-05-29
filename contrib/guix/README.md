@@ -13,7 +13,6 @@ We achieve bootstrappability by using Guix as a functional package manager.
 
 Conservatively, a x86_64 machine with:
 
-- 2 or more logical cores
 - 4GB of free disk space on the partition that /gnu/store will reside in
 - 24GB of free disk space on the partition that the Bitcoin Core git repository
   resides in
@@ -142,6 +141,11 @@ find output/ -type f -print0 | sort -z | xargs -r0 sha256sum
 
   If non-empty, will pass `V=1` to all `make` invocations, making `make` output
   verbose.
+
+  Note that any given value is ignored. The variable is only checked for
+  emptiness. More concretely, this means that `V=` (setting `V` to the empty
+  string) is interpreted the same way as not setting `V` at all, and that `V=0`
+  has the same effect as `V=1`.
 
 * _**ADDITIONAL_GUIX_ENVIRONMENT_FLAGS**_
 

@@ -27,7 +27,9 @@
 #include <sync.h>
 #include <txmempool.h>
 #include <ui_interface.h>
+#include <util/ref.h>
 #include <util/system.h>
+#include <util/translation.h>
 #include <validation.h>
 #include <warnings.h>
 
@@ -43,8 +45,8 @@ class CWallet;
 fs::path GetWalletDir();
 std::vector<fs::path> ListWalletDir();
 std::vector<std::shared_ptr<CWallet>> GetWallets();
-std::shared_ptr<CWallet> LoadWallet(interfaces::Chain& chain, const std::string& name, std::string& error, std::vector<std::string>& warnings);
-WalletCreationStatus CreateWallet(interfaces::Chain& chain, const SecureString& passphrase, uint64_t wallet_creation_flags, const std::string& name, std::string& error, std::vector<std::string>& warnings, std::shared_ptr<CWallet>& result);
+std::shared_ptr<CWallet> LoadWallet(interfaces::Chain& chain, const std::string& name, bilingual_str& error, std::vector<bilingual_str>& warnings);
+WalletCreationStatus CreateWallet(interfaces::Chain& chain, const SecureString& passphrase, uint64_t wallet_creation_flags, const std::string& name, bilingual_str& error, std::vector<bilingual_str>& warnings, std::shared_ptr<CWallet>& result);
 std::unique_ptr<interfaces::Handler> HandleLoadWallet(interfaces::Node::LoadWalletFn load_wallet);
 
 namespace interfaces {
@@ -54,7 +56,7 @@ namespace {
 class NodeImpl : public Node
 {
 public:
-    void initError(const std::string& message) override { InitError(message); }
+    void initError(const std::string& message) override { InitError(Untranslated(message)); }
     bool parseParameters(int argc, const char* const argv[], std::string& error) override
     {
         return gArgs.ParseParameters(argc, argv, error);
@@ -79,7 +81,7 @@ public:
     bool appInitMain() override
     {
         m_context.chain = MakeChain(m_context);
-        return AppInitMain(m_context);
+        return AppInitMain(m_context_ref, m_context);
     }
     void appShutdown() override
     {
@@ -224,7 +226,7 @@ public:
     CFeeRate getDustRelayFee() override { return ::dustRelayFee; }
     UniValue executeRpc(const std::string& command, const UniValue& params, const std::string& uri) override
     {
-        JSONRPCRequest req;
+        JSONRPCRequest req(m_context_ref);
         req.params = params;
         req.strMethod = command;
         req.URI = uri;
@@ -259,11 +261,11 @@ public:
         }
         return wallets;
     }
-    std::unique_ptr<Wallet> loadWallet(const std::string& name, std::string& error, std::vector<std::string>& warnings) override
+    std::unique_ptr<Wallet> loadWallet(const std::string& name, bilingual_str& error, std::vector<bilingual_str>& warnings) override
     {
         return MakeWallet(LoadWallet(*m_context.chain, name, error, warnings));
     }
-    std::unique_ptr<Wallet> createWallet(const SecureString& passphrase, uint64_t wallet_creation_flags, const std::string& name, std::string& error, std::vector<std::string>& warnings, WalletCreationStatus& status) override
+    std::unique_ptr<Wallet> createWallet(const SecureString& passphrase, uint64_t wallet_creation_flags, const std::string& name, bilingual_str& error, std::vector<bilingual_str>& warnings, WalletCreationStatus& status) override
     {
         std::shared_ptr<CWallet> wallet;
         status = CreateWallet(*m_context.chain, passphrase, wallet_creation_flags, name, error, warnings, wallet);
@@ -307,21 +309,22 @@ public:
     }
     std::unique_ptr<Handler> handleNotifyBlockTip(NotifyBlockTipFn fn) override
     {
-        return MakeHandler(::uiInterface.NotifyBlockTip_connect([fn](bool initial_download, const CBlockIndex* block) {
-            fn(initial_download, block->nHeight, block->GetBlockTime(),
+        return MakeHandler(::uiInterface.NotifyBlockTip_connect([fn](SynchronizationState sync_state, const CBlockIndex* block) {
+            fn(sync_state, block->nHeight, block->GetBlockTime(),
                 GuessVerificationProgress(Params().TxData(), block));
         }));
     }
     std::unique_ptr<Handler> handleNotifyHeaderTip(NotifyHeaderTipFn fn) override
     {
         return MakeHandler(
-            ::uiInterface.NotifyHeaderTip_connect([fn](bool initial_download, const CBlockIndex* block) {
-                fn(initial_download, block->nHeight, block->GetBlockTime(),
+            ::uiInterface.NotifyHeaderTip_connect([fn](SynchronizationState sync_state, const CBlockIndex* block) {
+                fn(sync_state, block->nHeight, block->GetBlockTime(),
                     /* verification progress is unused when a header was received */ 0);
             }));
     }
     NodeContext* context() override { return &m_context; }
     NodeContext m_context;
+    util::Ref m_context_ref{m_context};
 };
 
 } // namespace
