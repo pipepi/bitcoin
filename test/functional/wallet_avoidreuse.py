@@ -9,7 +9,6 @@ from test_framework.util import (
     assert_approx,
     assert_equal,
     assert_raises_rpc_error,
-    connect_nodes,
 )
 
 def reset_balance(node, discardaddr):
@@ -66,7 +65,6 @@ def assert_balances(node, mine):
 class AvoidReuseTest(BitcoinTestFramework):
 
     def set_test_params(self):
-        self.setup_clean_chain = False
         self.num_nodes = 2
         # This test isn't testing txn relay/timing, so set whitelist on the
         # peers for instant txn relay. This speeds up the test run time 2-3x.
@@ -110,10 +108,8 @@ class AvoidReuseTest(BitcoinTestFramework):
         assert_equal(self.nodes[0].getwalletinfo()["avoid_reuse"], False)
         assert_equal(self.nodes[1].getwalletinfo()["avoid_reuse"], True)
 
-        # Stop and restart node 1
-        self.stop_node(1)
-        self.start_node(1)
-        connect_nodes(self.nodes[0], 1)
+        self.restart_node(1)
+        self.connect_nodes(0, 1)
 
         # Flags should still be node1.avoid_reuse=false, node2.avoid_reuse=true
         assert_equal(self.nodes[0].getwalletinfo()["avoid_reuse"], False)

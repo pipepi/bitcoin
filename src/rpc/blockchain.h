@@ -1,4 +1,4 @@
-// Copyright (c) 2017-2019 The Bitcoin Core developers
+// Copyright (c) 2017-2020 The Bitcoin Core developers
 // Distributed under the MIT software license, see the accompanying
 // file COPYING or http://www.opensource.org/licenses/mit-license.php.
 
@@ -6,6 +6,7 @@
 #define BITCOIN_RPC_BLOCKCHAIN_H
 
 #include <amount.h>
+#include <streams.h>
 #include <sync.h>
 
 #include <stdint.h>
@@ -15,6 +16,8 @@ extern RecursiveMutex cs_main;
 
 class CBlock;
 class CBlockIndex;
+class CBlockPolicyEstimator;
+class CChainState;
 class CTxMemPool;
 class ChainstateManager;
 class UniValue;
@@ -43,7 +46,7 @@ UniValue blockToJSON(const CBlock& block, const CBlockIndex* tip, const CBlockIn
 UniValue MempoolInfoToJSON(const CTxMemPool& pool);
 
 /** Mempool to JSON */
-UniValue MempoolToJSON(const CTxMemPool& pool, bool verbose = false);
+UniValue MempoolToJSON(const CTxMemPool& pool, bool verbose = false, bool include_mempool_sequence = false);
 
 /** Block header to JSON */
 UniValue blockheaderToJSON(const CBlockIndex* tip, const CBlockIndex* blockindex) LOCKS_EXCLUDED(cs_main);
@@ -54,5 +57,12 @@ void CalculatePercentilesByWeight(CAmount result[NUM_GETBLOCKSTATS_PERCENTILES],
 NodeContext& EnsureNodeContext(const util::Ref& context);
 CTxMemPool& EnsureMemPool(const util::Ref& context);
 ChainstateManager& EnsureChainman(const util::Ref& context);
+CBlockPolicyEstimator& EnsureFeeEstimator(const util::Ref& context);
+
+/**
+ * Helper to create UTXO snapshots given a chainstate and a file handle.
+ * @return a UniValue map containing metadata about the snapshot.
+ */
+UniValue CreateUTXOSnapshot(NodeContext& node, CChainState& chainstate, CAutoFile& afile);
 
 #endif

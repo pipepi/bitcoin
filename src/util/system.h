@@ -35,12 +35,13 @@
 #include <utility>
 #include <vector>
 
-#include <boost/thread/condition_variable.hpp> // for boost::thread_interrupted
+class UniValue;
 
 // Application startup time (used for uptime calculation)
 int64_t GetStartupTime();
 
 extern const char * const BITCOIN_CONF_FILENAME;
+extern const char * const BITCOIN_SETTINGS_FILENAME;
 
 void SetupEnvironment();
 bool SetupNetworking();
@@ -53,11 +54,23 @@ bool error(const char* fmt, const Args&... args)
 }
 
 void PrintExceptionContinue(const std::exception *pex, const char* pszThread);
+
+/**
+ * Ensure file contents are fully committed to disk, using a platform-specific
+ * feature analogous to fsync().
+ */
 bool FileCommit(FILE *file);
+
+/**
+ * Sync directory contents. This is required on some environments to ensure that
+ * newly created files are committed to disk.
+ */
+void DirectoryCommit(const fs::path &dirname);
+
 bool TruncateFile(FILE *file, unsigned int length);
 int RaiseFileDescriptorLimit(int nMinFD);
 void AllocateFileRange(FILE *file, unsigned int offset, unsigned int length);
-bool RenameOver(fs::path src, fs::path dest);
+[[nodiscard]] bool RenameOver(fs::path src, fs::path dest);
 bool LockDirectory(const fs::path& directory, const std::string lockfile_name, bool probe_only=false);
 void UnlockDirectory(const fs::path& directory, const std::string& lockfile_name);
 bool DirIsWritable(const fs::path& directory);
@@ -95,6 +108,16 @@ std::string ShellEscape(const std::string& arg);
 #if HAVE_SYSTEM
 void runCommand(const std::string& strCommand);
 #endif
+#ifdef ENABLE_EXTERNAL_SIGNER
+/**
+ * Execute a command which returns JSON, and parse the result.
+ *
+ * @param str_command The command to execute, including any arguments
+ * @param str_std_in string to pass to stdin
+ * @return parsed JSON
+ */
+UniValue RunCommandParseJSON(const std::string& str_command, const std::string& str_std_in="");
+#endif // ENABLE_EXTERNAL_SIGNER
 
 /**
  * Most paths passed as configuration arguments are treated as relative to
@@ -143,7 +166,7 @@ struct SectionInfo
 class ArgsManager
 {
 public:
-    enum Flags {
+    enum Flags : uint32_t {
         // Boolean options can accept negation syntax -noOPTION or -noOPTION=1
         ALLOW_BOOL = 0x01,
         ALLOW_INT = 0x02,
@@ -158,6 +181,7 @@ public:
         NETWORK_ONLY = 0x200,
         // This argument's value is sensitive (such as a password).
         SENSITIVE = 0x400,
+        COMMAND = 0x800,
     };
 
 protected:
@@ -170,12 +194,14 @@ protected:
 
     mutable RecursiveMutex cs_args;
     util::Settings m_settings GUARDED_BY(cs_args);
+    std::vector<std::string> m_command GUARDED_BY(cs_args);
     std::string m_network GUARDED_BY(cs_args);
     std::set<std::string> m_network_only_args GUARDED_BY(cs_args);
     std::map<OptionsCategory, std::map<std::string, Arg>> m_available_args GUARDED_BY(cs_args);
+    bool m_accept_any_command GUARDED_BY(cs_args){true};
     std::list<SectionInfo> m_config_sections GUARDED_BY(cs_args);
 
-    NODISCARD bool ReadConfigStream(std::istream& stream, const std::string& filepath, std::string& error, bool ignore_invalid_keys = false);
+    [[nodiscard]] bool ReadConfigStream(std::istream& stream, const std::string& filepath, std::string& error, bool ignore_invalid_keys = false);
 
     /**
      * Returns true if settings values from the default section should be used,
@@ -207,8 +233,8 @@ public:
      */
     void SelectConfigNetwork(const std::string& network);
 
-    NODISCARD bool ParseParameters(int argc, const char* const argv[], std::string& error);
-    NODISCARD bool ReadConfigFiles(std::string& error, bool ignore_invalid_keys = false);
+    [[nodiscard]] bool ParseParameters(int argc, const char* const argv[], std::string& error);
+    [[nodiscard]] bool ReadConfigFiles(std::string& error, bool ignore_invalid_keys = false);
 
     /**
      * Log warnings for options in m_section_only_args when
@@ -222,6 +248,20 @@ public:
      * Log warnings for unrecognized section names in the config file.
      */
     const std::list<SectionInfo> GetUnrecognizedSections() const;
+
+    struct Command {
+        /** The command (if one has been registered with AddCommand), or empty */
+        std::string command;
+        /**
+         * If command is non-empty: Any args that followed it
+         * If command is empty: The unregistered command and any args that followed it
+         */
+        std::vector<std::string> args;
+    };
+    /**
+     * Get the command and command args (returns std::nullopt if no command provided)
+     */
+    std::optional<const Command> GetCommand() const;
 
     /**
      * Return a vector of strings of the given argument
@@ -309,6 +349,11 @@ public:
     void AddArg(const std::string& name, const std::string& help, unsigned int flags, const OptionsCategory& cat);
 
     /**
+     * Add subcommand
+     */
+    void AddCommand(const std::string& cmd, const std::string& help, const OptionsCategory& cat);
+
+    /**
      * Add many hidden arguments
      */
     void AddHiddenArgs(const std::vector<std::string>& args);
@@ -332,6 +377,39 @@ public:
      * Return nullopt for unknown arg.
      */
     Optional<unsigned int> GetArgFlags(const std::string& name) const;
+
+    /**
+     * Read and update settings file with saved settings. This needs to be
+     * called after SelectParams() because the settings file location is
+     * network-specific.
+     */
+    bool InitSettings(std::string& error);
+
+    /**
+     * Get settings file path, or return false if read-write settings were
+     * disabled with -nosettings.
+     */
+    bool GetSettingsPath(fs::path* filepath = nullptr, bool temp = false) const;
+
+    /**
+     * Read settings file. Push errors to vector, or log them if null.
+     */
+    bool ReadSettingsFile(std::vector<std::string>* errors = nullptr);
+
+    /**
+     * Write settings file. Push errors to vector, or log them if null.
+     */
+    bool WriteSettingsFile(std::vector<std::string>* errors = nullptr) const;
+
+    /**
+     * Access settings with lock held.
+     */
+    template <typename Fn>
+    void LockSettings(Fn&& fn)
+    {
+        LOCK(cs_args);
+        fn(m_settings);
+    }
 
     /**
      * Log the config file options and the command line arguments,
@@ -391,11 +469,6 @@ template <typename Callable> void TraceThread(const char* name,  Callable func)
         LogPrintf("%s thread start\n", name);
         func();
         LogPrintf("%s thread exit\n", name);
-    }
-    catch (const boost::thread_interrupted&)
-    {
-        LogPrintf("%s thread interrupt\n", name);
-        throw;
     }
     catch (const std::exception& e) {
         PrintExceptionContinue(&e, name);

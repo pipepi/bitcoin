@@ -139,7 +139,7 @@ std::string DescriptorChecksum(const Span<const char>& span)
     return ret;
 }
 
-std::string AddChecksum(const std::string& str) { return str + "#" + DescriptorChecksum(MakeSpan(str)); }
+std::string AddChecksum(const std::string& str) { return str + "#" + DescriptorChecksum(str); }
 
 ////////////////////////////////////////////////////////////////////////////
 // Internal representation                                                //
@@ -156,7 +156,7 @@ protected:
     uint32_t m_expr_index;
 
 public:
-    PubkeyProvider(uint32_t exp_index) : m_expr_index(exp_index) {}
+    explicit PubkeyProvider(uint32_t exp_index) : m_expr_index(exp_index) {}
 
     virtual ~PubkeyProvider() = default;
 
@@ -179,6 +179,9 @@ public:
     /** Get the descriptor string form including private data (if available in arg). */
     virtual bool ToPrivateString(const SigningProvider& arg, std::string& out) const = 0;
 
+    /** Get the descriptor string form with the xpub at the last hardened derivation */
+    virtual bool ToNormalizedString(const SigningProvider& arg, std::string& out, bool priv) const = 0;
+
     /** Derive a private key, if private data is available in arg. */
     virtual bool GetPrivKey(int pos, const SigningProvider& arg, CKey& key) const = 0;
 };
@@ -190,7 +193,7 @@ class OriginPubkeyProvider final : public PubkeyProvider
 
     std::string OriginString() const
     {
-        return HexStr(std::begin(m_origin.fingerprint), std::end(m_origin.fingerprint)) + FormatHDKeypath(m_origin.path);
+        return HexStr(m_origin.fingerprint) + FormatHDKeypath(m_origin.path);
     }
 
 public:
@@ -210,6 +213,21 @@ public:
         std::string sub;
         if (!m_provider->ToPrivateString(arg, sub)) return false;
         ret = "[" + OriginString() + "]" + std::move(sub);
+        return true;
+    }
+    bool ToNormalizedString(const SigningProvider& arg, std::string& ret, bool priv) const override
+    {
+        std::string sub;
+        if (!m_provider->ToNormalizedString(arg, sub, priv)) return false;
+        // If m_provider is a BIP32PubkeyProvider, we may get a string formatted like a OriginPubkeyProvider
+        // In that case, we need to strip out the leading square bracket and fingerprint from the substring,
+        // and append that to our own origin string.
+        if (sub[0] == '[') {
+            sub = sub.substr(9);
+            ret = "[" + OriginString() + std::move(sub);
+        } else {
+            ret = "[" + OriginString() + "]" + std::move(sub);
+        }
         return true;
     }
     bool GetPrivKey(int pos, const SigningProvider& arg, CKey& key) const override
@@ -235,12 +253,18 @@ public:
     }
     bool IsRange() const override { return false; }
     size_t GetSize() const override { return m_pubkey.size(); }
-    std::string ToString() const override { return HexStr(m_pubkey.begin(), m_pubkey.end()); }
+    std::string ToString() const override { return HexStr(m_pubkey); }
     bool ToPrivateString(const SigningProvider& arg, std::string& ret) const override
     {
         CKey key;
         if (!arg.GetKey(m_pubkey.GetID(), key)) return false;
         ret = EncodeSecret(key);
+        return true;
+    }
+    bool ToNormalizedString(const SigningProvider& arg, std::string& ret, bool priv) const override
+    {
+        if (priv) return ToPrivateString(arg, ret);
+        ret = ToString();
         return true;
     }
     bool GetPrivKey(int pos, const SigningProvider& arg, CKey& key) const override
@@ -386,6 +410,56 @@ public:
         }
         return true;
     }
+    bool ToNormalizedString(const SigningProvider& arg, std::string& out, bool priv) const override
+    {
+        // For hardened derivation type, just return the typical string, nothing to normalize
+        if (m_derive == DeriveType::HARDENED) {
+            if (priv) return ToPrivateString(arg, out);
+            out = ToString();
+            return true;
+        }
+        // Step backwards to find the last hardened step in the path
+        int i = (int)m_path.size() - 1;
+        for (; i >= 0; --i) {
+            if (m_path.at(i) >> 31) {
+                break;
+            }
+        }
+        // Either no derivation or all unhardened derivation
+        if (i == -1) {
+            if (priv) return ToPrivateString(arg, out);
+            out = ToString();
+            return true;
+        }
+        // Derive the xpub at the last hardened step
+        CExtKey xprv;
+        if (!GetExtKey(arg, xprv)) return false;
+        KeyOriginInfo origin;
+        int k = 0;
+        for (; k <= i; ++k) {
+            // Derive
+            xprv.Derive(xprv, m_path.at(k));
+            // Add to the path
+            origin.path.push_back(m_path.at(k));
+            // First derivation element, get the fingerprint for origin
+            if (k == 0) {
+                std::copy(xprv.vchFingerprint, xprv.vchFingerprint + 4, origin.fingerprint);
+            }
+        }
+        // Build the remaining path
+        KeyPath end_path;
+        for (; k < (int)m_path.size(); ++k) {
+            end_path.push_back(m_path.at(k));
+        }
+        // Build the string
+        std::string origin_str = HexStr(origin.fingerprint) + FormatHDKeypath(origin.path);
+        out = "[" + origin_str + "]" + (priv ? EncodeExtKey(xprv) : EncodeExtPubKey(xprv.Neuter())) + FormatHDKeypath(end_path);
+        if (IsRange()) {
+            out += "/*";
+            assert(m_derive == DeriveType::UNHARDENED);
+        }
+        return true;
+    }
     bool GetPrivKey(int pos, const SigningProvider& arg, CKey& key) const override
     {
         CExtKey extkey;
@@ -449,7 +523,7 @@ public:
         return false;
     }
 
-    bool ToStringHelper(const SigningProvider* arg, std::string& out, bool priv) const
+    bool ToStringHelper(const SigningProvider* arg, std::string& out, bool priv, bool normalized) const
     {
         std::string extra = ToStringExtra();
         size_t pos = extra.size() > 0 ? 1 : 0;
@@ -457,7 +531,9 @@ public:
         for (const auto& pubkey : m_pubkey_args) {
             if (pos++) ret += ",";
             std::string tmp;
-            if (priv) {
+            if (normalized) {
+                if (!pubkey->ToNormalizedString(*arg, tmp, priv)) return false;
+            } else if (priv) {
                 if (!pubkey->ToPrivateString(*arg, tmp)) return false;
             } else {
                 tmp = pubkey->ToString();
@@ -467,7 +543,7 @@ public:
         if (m_subdescriptor_arg) {
             if (pos++) ret += ",";
             std::string tmp;
-            if (!m_subdescriptor_arg->ToStringHelper(arg, tmp, priv)) return false;
+            if (!m_subdescriptor_arg->ToStringHelper(arg, tmp, priv, normalized)) return false;
             ret += std::move(tmp);
         }
         out = std::move(ret) + ")";
@@ -477,13 +553,20 @@ public:
     std::string ToString() const final
     {
         std::string ret;
-        ToStringHelper(nullptr, ret, false);
+        ToStringHelper(nullptr, ret, false, false);
         return AddChecksum(ret);
     }
 
     bool ToPrivateString(const SigningProvider& arg, std::string& out) const final
     {
-        bool ret = ToStringHelper(&arg, out, true);
+        bool ret = ToStringHelper(&arg, out, true, false);
+        out = AddChecksum(out);
+        return ret;
+    }
+
+    bool ToNormalizedString(const SigningProvider& arg, std::string& out, bool priv) const override final
+    {
+        bool ret = ToStringHelper(&arg, out, priv, true);
         out = AddChecksum(out);
         return ret;
     }
@@ -565,7 +648,7 @@ public:
 
     Optional<OutputType> GetOutputType() const override
     {
-        switch (m_destination.which()) {
+        switch (m_destination.index()) {
             case 1 /* PKHash */:
             case 2 /* ScriptHash */: return OutputType::LEGACY;
             case 3 /* WitnessV0ScriptHash */:
@@ -583,7 +666,7 @@ class RawDescriptor final : public DescriptorImpl
 {
     const CScript m_script;
 protected:
-    std::string ToStringExtra() const override { return HexStr(m_script.begin(), m_script.end()); }
+    std::string ToStringExtra() const override { return HexStr(m_script); }
     std::vector<CScript> MakeScripts(const std::vector<CPubKey>&, const CScript*, FlatSigningProvider&) const override { return Vector(m_script); }
 public:
     RawDescriptor(CScript script) : DescriptorImpl({}, {}, "raw"), m_script(std::move(script)) {}
@@ -593,7 +676,7 @@ public:
     {
         CTxDestination dest;
         ExtractDestination(m_script, dest);
-        switch (dest.which()) {
+        switch (dest.index()) {
             case 1 /* PKHash */:
             case 2 /* ScriptHash */: return OutputType::LEGACY;
             case 3 /* WitnessV0ScriptHash */:
@@ -731,7 +814,7 @@ enum class ParseScriptContext {
 };
 
 /** Parse a key path, being passed a split list of elements (the first element is ignored). */
-NODISCARD bool ParseKeyPath(const std::vector<Span<const char>>& split, KeyPath& out, std::string& error)
+[[nodiscard]] bool ParseKeyPath(const std::vector<Span<const char>>& split, KeyPath& out, std::string& error)
 {
     for (size_t i = 1; i < split.size(); ++i) {
         Span<const char> elem = split[i];
@@ -825,8 +908,9 @@ std::unique_ptr<PubkeyProvider> ParsePubkey(uint32_t key_exp_index, const Span<c
         return nullptr;
     }
     if (origin_split.size() == 1) return ParsePubkeyInner(key_exp_index, origin_split[0], permit_uncompressed, out, error);
-    if (origin_split[0].size() < 1 || origin_split[0][0] != '[') {
-        error = strprintf("Key origin start '[ character expected but not found, got '%c' instead", origin_split[0][0]);
+    if (origin_split[0].empty() || origin_split[0][0] != '[') {
+        error = strprintf("Key origin start '[ character expected but not found, got '%c' instead",
+                          origin_split[0].empty() ? /** empty, implies split char */ ']' : origin_split[0][0]);
         return nullptr;
     }
     auto slash_split = Split(origin_split[0].subspan(1), '/');
@@ -896,7 +980,7 @@ std::unique_ptr<DescriptorImpl> ParseScript(uint32_t key_exp_index, Span<const c
             providers.emplace_back(std::move(pk));
             key_exp_index++;
         }
-        if (providers.size() < 1 || providers.size() > 16) {
+        if (providers.empty() || providers.size() > 16) {
             error = strprintf("Cannot have %u keys in multisig; must have between 1 and 16 keys, inclusive", providers.size());
             return nullptr;
         } else if (thres < 1) {
@@ -985,15 +1069,15 @@ std::unique_ptr<PubkeyProvider> InferPubkey(const CPubKey& pubkey, ParseScriptCo
 std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptContext ctx, const SigningProvider& provider)
 {
     std::vector<std::vector<unsigned char>> data;
-    txnouttype txntype = Solver(script, data);
+    TxoutType txntype = Solver(script, data);
 
-    if (txntype == TX_PUBKEY) {
+    if (txntype == TxoutType::PUBKEY) {
         CPubKey pubkey(data[0].begin(), data[0].end());
         if (pubkey.IsValid()) {
             return MakeUnique<PKDescriptor>(InferPubkey(pubkey, ctx, provider));
         }
     }
-    if (txntype == TX_PUBKEYHASH) {
+    if (txntype == TxoutType::PUBKEYHASH) {
         uint160 hash(data[0]);
         CKeyID keyid(hash);
         CPubKey pubkey;
@@ -1001,7 +1085,7 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
             return MakeUnique<PKHDescriptor>(InferPubkey(pubkey, ctx, provider));
         }
     }
-    if (txntype == TX_WITNESS_V0_KEYHASH && ctx != ParseScriptContext::P2WSH) {
+    if (txntype == TxoutType::WITNESS_V0_KEYHASH && ctx != ParseScriptContext::P2WSH) {
         uint160 hash(data[0]);
         CKeyID keyid(hash);
         CPubKey pubkey;
@@ -1009,7 +1093,7 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
             return MakeUnique<WPKHDescriptor>(InferPubkey(pubkey, ctx, provider));
         }
     }
-    if (txntype == TX_MULTISIG) {
+    if (txntype == TxoutType::MULTISIG) {
         std::vector<std::unique_ptr<PubkeyProvider>> providers;
         for (size_t i = 1; i + 1 < data.size(); ++i) {
             CPubKey pubkey(data[i].begin(), data[i].end());
@@ -1017,7 +1101,7 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
         }
         return MakeUnique<MultisigDescriptor>((int)data[0][0], std::move(providers));
     }
-    if (txntype == TX_SCRIPTHASH && ctx == ParseScriptContext::TOP) {
+    if (txntype == TxoutType::SCRIPTHASH && ctx == ParseScriptContext::TOP) {
         uint160 hash(data[0]);
         CScriptID scriptid(hash);
         CScript subscript;
@@ -1026,7 +1110,7 @@ std::unique_ptr<DescriptorImpl> InferScript(const CScript& script, ParseScriptCo
             if (sub) return MakeUnique<SHDescriptor>(std::move(sub));
         }
     }
-    if (txntype == TX_WITNESS_V0_SCRIPTHASH && ctx != ParseScriptContext::P2WSH) {
+    if (txntype == TxoutType::WITNESS_V0_SCRIPTHASH && ctx != ParseScriptContext::P2WSH) {
         CScriptID scriptid;
         CRIPEMD160().Write(data[0].data(), data[0].size()).Finalize(scriptid.begin());
         CScript subscript;
@@ -1087,7 +1171,7 @@ bool CheckChecksum(Span<const char>& sp, bool require_checksum, std::string& err
 
 std::unique_ptr<Descriptor> Parse(const std::string& descriptor, FlatSigningProvider& out, std::string& error, bool require_checksum)
 {
-    Span<const char> sp(descriptor.data(), descriptor.size());
+    Span<const char> sp{descriptor};
     if (!CheckChecksum(sp, require_checksum, error)) return nullptr;
     auto ret = ParseScript(0, sp, ParseScriptContext::TOP, out, error);
     if (sp.size() == 0 && ret) return std::unique_ptr<Descriptor>(std::move(ret));
@@ -1098,7 +1182,7 @@ std::string GetDescriptorChecksum(const std::string& descriptor)
 {
     std::string ret;
     std::string error;
-    Span<const char> sp(descriptor.data(), descriptor.size());
+    Span<const char> sp{descriptor};
     if (!CheckChecksum(sp, false, error, &ret)) return "";
     return ret;
 }

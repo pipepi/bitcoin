@@ -105,7 +105,7 @@ public:
     SendCoinsReturn sendCoins(WalletModelTransaction &transaction);
 
     // Wallet encryption
-    bool setWalletEncrypted(bool encrypted, const SecureString &passphrase);
+    bool setWalletEncrypted(const SecureString& passphrase);
     // Passphrase only needed when unlocking
     bool setWalletLocked(bool locked, const SecureString &passPhrase=SecureString());
     bool changePassphrase(const SecureString &oldPass, const SecureString &newPass);
@@ -144,8 +144,8 @@ public:
 
     interfaces::Node& node() const { return m_node; }
     interfaces::Wallet& wallet() const { return *m_wallet; }
+    ClientModel& clientModel() const { return *m_client_model; }
     void setClientModel(ClientModel* client_model);
-    int getNumBlocks() const { return cachedNumBlocks; }
 
     QString getWalletName() const;
     QString getDisplayName() const;
@@ -153,6 +153,11 @@ public:
     bool isMultiwallet();
 
     AddressTableModel* getAddressTableModel() const { return addressTableModel; }
+
+    void refresh(bool pk_hash_only = false);
+
+    uint256 getLastBlockProcessed() const;
+
 private:
     std::unique_ptr<interfaces::Wallet> m_wallet;
     std::unique_ptr<interfaces::Handler> m_handler_unload;
@@ -179,8 +184,10 @@ private:
     // Cache some values to be able to detect changes
     interfaces::WalletBalances m_cached_balances;
     EncryptionStatus cachedEncryptionStatus;
-    int cachedNumBlocks;
     QTimer* timer;
+
+    // Block hash denoting when the last balance update was done.
+    uint256 m_cached_last_update_tip{};
 
     void subscribeToCoreSignals();
     void unsubscribeFromCoreSignals();

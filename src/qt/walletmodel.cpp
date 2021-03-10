@@ -21,14 +21,15 @@
 #include <interfaces/handler.h>
 #include <interfaces/node.h>
 #include <key_io.h>
+#include <node/ui_interface.h>
 #include <psbt.h>
-#include <ui_interface.h>
 #include <util/system.h> // for GetBoolArg
 #include <util/translation.h>
 #include <wallet/coincontrol.h>
 #include <wallet/wallet.h> // for CRecipient
 
 #include <stdint.h>
+#include <functional>
 
 #include <QDebug>
 #include <QMessageBox>
@@ -46,7 +47,6 @@ WalletModel::WalletModel(std::unique_ptr<interfaces::Wallet> wallet, ClientModel
     transactionTableModel(nullptr),
     recentRequestsTableModel(nullptr),
     cachedEncryptionStatus(Unencrypted),
-    cachedNumBlocks(0),
     timer(new QTimer(this))
 {
     fHaveWatchOnly = m_wallet->haveWatchOnly();
@@ -88,24 +88,23 @@ void WalletModel::pollBalanceChanged()
 {
     // Avoid recomputing wallet balances unless a TransactionChanged or
     // BlockTip notification was received.
-    if (!fForceCheckBalanceChanged && cachedNumBlocks == m_client_model->getNumBlocks()) return;
+    if (!fForceCheckBalanceChanged && m_cached_last_update_tip == getLastBlockProcessed()) return;
 
     // Try to get balances and return early if locks can't be acquired. This
     // avoids the GUI from getting stuck on periodical polls if the core is
     // holding the locks for a longer time - for example, during a wallet
     // rescan.
     interfaces::WalletBalances new_balances;
-    int numBlocks = -1;
-    if (!m_wallet->tryGetBalances(new_balances, numBlocks)) {
+    uint256 block_hash;
+    if (!m_wallet->tryGetBalances(new_balances, block_hash)) {
         return;
     }
 
-    if(fForceCheckBalanceChanged || numBlocks != cachedNumBlocks)
-    {
+    if (fForceCheckBalanceChanged || block_hash != m_cached_last_update_tip) {
         fForceCheckBalanceChanged = false;
 
         // Balance and number of transactions might have changed
-        cachedNumBlocks = numBlocks;
+        m_cached_last_update_tip = block_hash;
 
         checkBalanceChanged(new_balances);
         if(transactionTableModel)
@@ -246,7 +245,7 @@ WalletModel::SendCoinsReturn WalletModel::sendCoins(WalletModelTransaction &tran
 
         CDataStream ssTx(SER_NETWORK, PROTOCOL_VERSION);
         ssTx << *newTx;
-        transaction_array.append(&(ssTx[0]), ssTx.size());
+        transaction_array.append((const char*)&(ssTx[0]), ssTx.size());
     }
 
     // Add addresses / update labels that we've sent to the address book,
@@ -315,12 +314,9 @@ WalletModel::EncryptionStatus WalletModel::getEncryptionStatus() const
     }
 }
 
-bool WalletModel::setWalletEncrypted(bool encrypted, const SecureString &passphrase)
+bool WalletModel::setWalletEncrypted(const SecureString& passphrase)
 {
-    if (encrypted) {
-        return m_wallet->encryptWallet(passphrase);
-    }
-    return false;
+    return m_wallet->encryptWallet(passphrase);
 }
 
 bool WalletModel::setWalletLocked(bool locked, const SecureString &passPhrase)
@@ -415,7 +411,7 @@ void WalletModel::subscribeToCoreSignals()
     m_handler_transaction_changed = m_wallet->handleTransactionChanged(std::bind(NotifyTransactionChanged, this, std::placeholders::_1, std::placeholders::_2));
     m_handler_show_progress = m_wallet->handleShowProgress(std::bind(ShowProgress, this, std::placeholders::_1, std::placeholders::_2));
     m_handler_watch_only_changed = m_wallet->handleWatchOnlyChanged(std::bind(NotifyWatchonlyChanged, this, std::placeholders::_1));
-    m_handler_can_get_addrs_changed = m_wallet->handleCanGetAddressesChanged(boost::bind(NotifyCanGetAddressesChanged, this));
+    m_handler_can_get_addrs_changed = m_wallet->handleCanGetAddressesChanged(std::bind(NotifyCanGetAddressesChanged, this));
 }
 
 void WalletModel::unsubscribeFromCoreSignals()
@@ -519,6 +515,13 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
     questionString.append("</td><td>");
     questionString.append(BitcoinUnits::formatHtmlWithUnit(getOptionsModel()->getDisplayUnit(), new_fee));
     questionString.append("</td></tr></table>");
+
+    // Display warning in the "Confirm fee bump" window if the "Coin Control Features" option is enabled
+    if (getOptionsModel()->getCoinControlFeatures()) {
+        questionString.append("<br><br>");
+        questionString.append(tr("Warning: This may pay the additional fee by reducing change outputs or adding inputs, when necessary. It may add a new change output if one does not already exist. These changes may potentially leak privacy."));
+    }
+
     SendConfirmationDialog confirmationDialog(tr("Confirm fee bump"), questionString);
     confirmationDialog.exec();
     QMessageBox::StandardButton retval = static_cast<QMessageBox::StandardButton>(confirmationDialog.result());
@@ -538,7 +541,7 @@ bool WalletModel::bumpFee(uint256 hash, uint256& new_hash)
     if (create_psbt) {
         PartiallySignedTransaction psbtx(mtx);
         bool complete = false;
-        const TransactionError err = wallet().fillPSBT(SIGHASH_ALL, false /* sign */, true /* bip32derivs */, psbtx, complete);
+        const TransactionError err = wallet().fillPSBT(SIGHASH_ALL, false /* sign */, true /* bip32derivs */, psbtx, complete, nullptr);
         if (err != TransactionError::OK || complete) {
             QMessageBox::critical(nullptr, tr("Fee bump error"), tr("Can't draft transaction."));
             return false;
@@ -583,5 +586,15 @@ QString WalletModel::getDisplayName() const
 
 bool WalletModel::isMultiwallet()
 {
-    return m_node.getWallets().size() > 1;
+    return m_node.walletClient().getWallets().size() > 1;
+}
+
+void WalletModel::refresh(bool pk_hash_only)
+{
+    addressTableModel = new AddressTableModel(this, pk_hash_only);
+}
+
+uint256 WalletModel::getLastBlockProcessed() const
+{
+    return m_client_model ? m_client_model->getBestBlockHash() : uint256{};
 }
