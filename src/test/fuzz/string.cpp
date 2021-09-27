@@ -5,6 +5,7 @@
 #include <blockfilter.h>
 #include <clientversion.h>
 #include <logging.h>
+#include <netaddress.h>
 #include <netbase.h>
 #include <outputtype.h>
 #include <rpc/client.h>
@@ -65,8 +66,7 @@ FUZZ_TARGET(string)
         (void)ParseNonRFCJSONValue(random_string_1);
     } catch (const std::runtime_error&) {
     }
-    OutputType output_type;
-    (void)ParseOutputType(random_string_1, output_type);
+    (void)ParseOutputType(random_string_1);
     (void)RemovePrefix(random_string_1, random_string_2);
     (void)ResolveErrMsg(random_string_1, random_string_2);
     try {
@@ -82,7 +82,7 @@ FUZZ_TARGET(string)
 #ifndef WIN32
     (void)ShellEscape(random_string_1);
 #endif // WIN32
-    int port_out;
+    uint16_t port_out;
     std::string host_out;
     SplitHostPort(random_string_1, port_out, host_out);
     (void)TimingResistantEqual(random_string_1, random_string_2);

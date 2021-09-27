@@ -6,7 +6,7 @@ template to create the initial release notes draft.*
 for the process.*
 
 *Create the draft, named* "*version* Release Notes Draft"
-*(e.g. "0.20.0 Release Notes Draft"), as a collaborative wiki in:*
+*(e.g. "22.0 Release Notes Draft"), as a collaborative wiki in:*
 
 https://github.com/bitcoin-core/bitcoin-devwiki/wiki/
 
@@ -46,14 +46,10 @@ Compatibility
 ==============
 
 Bitcoin Core is supported and extensively tested on operating systems
-using the Linux kernel, macOS 10.14+, and Windows 7 and newer.  Bitcoin
+using the Linux kernel, macOS 10.15+, and Windows 7 and newer.  Bitcoin
 Core should also work on most other Unix-like systems but is not as
 frequently tested on them.  It is not recommended to use Bitcoin Core on
 unsupported systems.
-
-From Bitcoin Core 0.22.0 onwards, macOS versions earlier than 10.14 are no
-longer supported. Additionally, Bitcoin Core does not yet change appearance
-when macOS "dark mode" is activated.
 
 Notable changes
 ===============
@@ -61,15 +57,12 @@ Notable changes
 P2P and network changes
 -----------------------
 
+- A bitcoind node will no longer rumour addresses to inbound peers by default.
+  They will become eligible for address gossip after sending an ADDR, ADDRV2,
+  or GETADDR message. (#21528)
+
 Updated RPCs
 ------------
-- `getpeerinfo` no longer returns the following fields: `addnode`, `banscore`,
-  and `whitelisted`, which were previously deprecated in 0.21. Instead of
-  `addnode`, the `connection_type` field returns manual. Instead of
-  `whitelisted`, the `permissions` field indicates if the peer has special
-  privileges. The `banscore` field has simply been removed. (#20755)
-
-Changes to Wallet or GUI related RPCs can be found in the GUI or Wallet section below.
 
 New RPCs
 --------
@@ -77,25 +70,33 @@ New RPCs
 Build System
 ------------
 
+Files
+-----
+
+* On startup, the list of banned hosts and networks (via `setban` RPC) in
+  `banlist.dat` is ignored and only `banlist.json` is considered. Bitcoin Core
+  version 22.x is the only version that can read `banlist.dat` and also write
+  it to `banlist.json`. If `banlist.json` already exists, version 22.x will not
+  try to translate the `banlist.dat` into json. After an upgrade, `listbanned`
+  can be used to double check the parsed entries. (#22570)
+
 New settings
 ------------
 
 Updated settings
 ----------------
 
-Changes to Wallet or GUI related settings can be found in the GUI or Wallet section below.
-
-- Passing an invalid `-rpcauth` argument now cause bitcoind to fail to start.  (#20461)
-
 Tools and Utilities
 -------------------
 
+- Update `-getinfo` to return data in a user-friendly format that also reduces vertical space. (#21832)
+
+- CLI `-addrinfo` now returns a single field for the number of `onion` addresses
+  known to the node instead of separate `torv2` and `torv3` fields, as support
+  for Tor V2 addresses was removed from Bitcoin Core in 22.0. (#22544)
+
 Wallet
 ------
-
-- A new `listdescriptors` RPC is available to inspect the contents of descriptor-enabled wallets.
-  The RPC returns public versions of all imported descriptors, including their timestamp and flags.
-  For ranged descriptors, it also returns the range boundaries and the next index to generate addresses from. (#20226)
 
 GUI changes
 -----------
@@ -106,8 +107,14 @@ Low-level changes
 RPC
 ---
 
+- `getblockchaininfo` now returns a new `time` field, that provides the chain tip time. (#22407)
+
 Tests
 -----
+
+- For the `regtest` network the activation heights of several softforks were
+  set to block height 1. They can be changed by the runtime setting
+  `-testactivationheight=name@height`. (#22818)
 
 Credits
 =======

@@ -356,7 +356,7 @@ class P2PInterface(P2PConnection):
 
         return create_conn
 
-    def peer_accept_connection(self, *args, services=NODE_NETWORK | NODE_WITNESS, **kwargs):
+    def peer_accept_connection(self, *args, services=P2P_SERVICES, **kwargs):
         create_conn = super().peer_accept_connection(*args, **kwargs)
         self.peer_connect_send_version(services)
 
@@ -438,6 +438,7 @@ class P2PInterface(P2PConnection):
             self.send_message(msg_sendaddrv2())
         self.send_message(msg_verack())
         self.nServices = message.nServices
+        self.send_message(msg_getaddr())
 
     # Connection helper methods
 
@@ -539,8 +540,16 @@ class P2PInterface(P2PConnection):
         self.send_message(message)
         self.sync_with_ping(timeout=timeout)
 
-    # Sync up with the node
+    def sync_send_with_ping(self, timeout=60):
+        """Ensure SendMessages is called on this connection"""
+        # Calling sync_with_ping twice requires that the node calls
+        # `ProcessMessage` twice, and thus ensures `SendMessages` must have
+        # been called at least once
+        self.sync_with_ping()
+        self.sync_with_ping()
+
     def sync_with_ping(self, timeout=60):
+        """Ensure ProcessMessages is called on this connection"""
         self.send_message(msg_ping(nonce=self.ping_counter))
 
         def test_function():
@@ -568,6 +577,8 @@ class NetworkThread(threading.Thread):
 
         NetworkThread.listeners = {}
         NetworkThread.protos = {}
+        if sys.platform == 'win32':
+            asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
         NetworkThread.network_event_loop = asyncio.new_event_loop()
 
     def run(self):

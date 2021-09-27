@@ -1,7 +1,7 @@
 Format: http://www.debian.org/doc/packaging-manuals/copyright-format/1.0/
 Upstream-Name: Bitcoin
 Upstream-Contact: Satoshi Nakamoto <satoshin@gmx.com>
- irc://#bitcoin@freenode.net
+ irc://#bitcoin-core-dev@libera.chat
 Source: https://github.com/bitcoin/bitcoin
 
 Files: *
@@ -87,7 +87,7 @@ Files: src/qt/res/icons/proxy.png
 Copyright: Cristian Mircea Messel
 License: public-domain
 
-Files: src/qt/fonts/RobotoMono-Bold.ttf
+Files: src/qt/res/fonts/RobotoMono-Bold.ttf
 License: Apache-2.0
 Comment: Site: https://fonts.google.com/specimen/Roboto+Mono
 

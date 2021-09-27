@@ -19,6 +19,8 @@
 
 #include <node/ui_interface.h>
 
+#include <optional>
+
 #include <QApplication>
 #include <QComboBox>
 #include <QDateTimeEdit>
@@ -37,8 +39,8 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *parent) :
-    QWidget(parent)
+TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *parent)
+    : QWidget(parent), m_platform_style{platformStyle}
 {
     // Build filter row
     setContentsMargins(0,0,0,0);
@@ -73,7 +75,7 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
     dateWidget->addItem(tr("This month"), ThisMonth);
     dateWidget->addItem(tr("Last month"), LastMonth);
     dateWidget->addItem(tr("This year"), ThisYear);
-    dateWidget->addItem(tr("Range..."), Range);
+    dateWidget->addItem(tr("Range…"), Range);
     hlayout->addWidget(dateWidget);
 
     typeWidget = new QComboBox(this);
@@ -161,54 +163,33 @@ TransactionView::TransactionView(const PlatformStyle *platformStyle, QWidget *pa
         transactionView->horizontalHeader()->setStretchLastSection(true);
     }
 
-    // Actions
-    abandonAction = new QAction(tr("Abandon transaction"), this);
-    bumpFeeAction = new QAction(tr("Increase transaction fee"), this);
-    bumpFeeAction->setObjectName("bumpFeeAction");
-    copyAddressAction = new QAction(tr("Copy address"), this);
-    copyLabelAction = new QAction(tr("Copy label"), this);
-    QAction *copyAmountAction = new QAction(tr("Copy amount"), this);
-    QAction *copyTxIDAction = new QAction(tr("Copy transaction ID"), this);
-    QAction *copyTxHexAction = new QAction(tr("Copy raw transaction"), this);
-    QAction *copyTxPlainText = new QAction(tr("Copy full transaction details"), this);
-    QAction *editLabelAction = new QAction(tr("Edit address label"), this);
-    QAction *showDetailsAction = new QAction(tr("Show transaction details"), this);
-
     contextMenu = new QMenu(this);
     contextMenu->setObjectName("contextMenu");
-    contextMenu->addAction(copyAddressAction);
-    contextMenu->addAction(copyLabelAction);
-    contextMenu->addAction(copyAmountAction);
-    contextMenu->addAction(copyTxIDAction);
-    contextMenu->addAction(copyTxHexAction);
-    contextMenu->addAction(copyTxPlainText);
-    contextMenu->addAction(showDetailsAction);
+    copyAddressAction = contextMenu->addAction(tr("&Copy address"), this, &TransactionView::copyAddress);
+    copyLabelAction = contextMenu->addAction(tr("Copy &label"), this, &TransactionView::copyLabel);
+    contextMenu->addAction(tr("Copy &amount"), this, &TransactionView::copyAmount);
+    contextMenu->addAction(tr("Copy transaction &ID"), this, &TransactionView::copyTxID);
+    contextMenu->addAction(tr("Copy &raw transaction"), this, &TransactionView::copyTxHex);
+    contextMenu->addAction(tr("Copy full transaction &details"), this, &TransactionView::copyTxPlainText);
+    contextMenu->addAction(tr("&Show transaction details"), this, &TransactionView::showDetails);
     contextMenu->addSeparator();
-    contextMenu->addAction(bumpFeeAction);
-    contextMenu->addAction(abandonAction);
-    contextMenu->addAction(editLabelAction);
+    bumpFeeAction = contextMenu->addAction(tr("Increase transaction &fee"));
+    GUIUtil::ExceptionSafeConnect(bumpFeeAction, &QAction::triggered, this, &TransactionView::bumpFee);
+    bumpFeeAction->setObjectName("bumpFeeAction");
+    abandonAction = contextMenu->addAction(tr("A&bandon transaction"), this, &TransactionView::abandonTx);
+    contextMenu->addAction(tr("&Edit address label"), this, &TransactionView::editLabel);
 
-    connect(dateWidget, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), this, &TransactionView::chooseDate);
-    connect(typeWidget, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), this, &TransactionView::chooseType);
-    connect(watchOnlyWidget, static_cast<void (QComboBox::*)(int)>(&QComboBox::activated), this, &TransactionView::chooseWatchonly);
-    connect(amountWidget, &QLineEdit::textChanged, amount_typing_delay, static_cast<void (QTimer::*)()>(&QTimer::start));
+    connect(dateWidget, qOverload<int>(&QComboBox::activated), this, &TransactionView::chooseDate);
+    connect(typeWidget, qOverload<int>(&QComboBox::activated), this, &TransactionView::chooseType);
+    connect(watchOnlyWidget, qOverload<int>(&QComboBox::activated), this, &TransactionView::chooseWatchonly);
+    connect(amountWidget, &QLineEdit::textChanged, amount_typing_delay, qOverload<>(&QTimer::start));
     connect(amount_typing_delay, &QTimer::timeout, this, &TransactionView::changedAmount);
-    connect(search_widget, &QLineEdit::textChanged, prefix_typing_delay, static_cast<void (QTimer::*)()>(&QTimer::start));
+    connect(search_widget, &QLineEdit::textChanged, prefix_typing_delay, qOverload<>(&QTimer::start));
     connect(prefix_typing_delay, &QTimer::timeout, this, &TransactionView::changedSearch);
 
     connect(transactionView, &QTableView::doubleClicked, this, &TransactionView::doubleClicked);
     connect(transactionView, &QTableView::customContextMenuRequested, this, &TransactionView::contextualMenu);
 
-    connect(bumpFeeAction, &QAction::triggered, this, &TransactionView::bumpFee);
-    connect(abandonAction, &QAction::triggered, this, &TransactionView::abandonTx);
-    connect(copyAddressAction, &QAction::triggered, this, &TransactionView::copyAddress);
-    connect(copyLabelAction, &QAction::triggered, this, &TransactionView::copyLabel);
-    connect(copyAmountAction, &QAction::triggered, this, &TransactionView::copyAmount);
-    connect(copyTxIDAction, &QAction::triggered, this, &TransactionView::copyTxID);
-    connect(copyTxHexAction, &QAction::triggered, this, &TransactionView::copyTxHex);
-    connect(copyTxPlainText, &QAction::triggered, this, &TransactionView::copyTxPlainText);
-    connect(editLabelAction, &QAction::triggered, this, &TransactionView::editLabel);
-    connect(showDetailsAction, &QAction::triggered, this, &TransactionView::showDetails);
     // Double-clicking on a transaction on the transaction history page shows details
     connect(this, &TransactionView::doubleClicked, this, &TransactionView::showDetails);
     // Highlight transaction after fee bump
@@ -264,6 +245,20 @@ void TransactionView::setModel(WalletModel *_model)
     }
 }
 
+void TransactionView::changeEvent(QEvent* e)
+{
+    if (e->type() == QEvent::PaletteChange) {
+        watchOnlyWidget->setItemIcon(
+            TransactionFilterProxy::WatchOnlyFilter_Yes,
+            m_platform_style->SingleColorIcon(QStringLiteral(":/icons/eye_plus")));
+        watchOnlyWidget->setItemIcon(
+            TransactionFilterProxy::WatchOnlyFilter_No,
+            m_platform_style->SingleColorIcon(QStringLiteral(":/icons/eye_minus")));
+    }
+
+    QWidget::changeEvent(e);
+}
+
 void TransactionView::chooseDate(int idx)
 {
     if (!transactionProxyModel) return;
@@ -273,26 +268,26 @@ void TransactionView::chooseDate(int idx)
     {
     case All:
         transactionProxyModel->setDateRange(
-                TransactionFilterProxy::MIN_DATE,
-                TransactionFilterProxy::MAX_DATE);
+                std::nullopt,
+                std::nullopt);
         break;
     case Today:
         transactionProxyModel->setDateRange(
                 GUIUtil::StartOfDay(current),
-                TransactionFilterProxy::MAX_DATE);
+                std::nullopt);
         break;
     case ThisWeek: {
         // Find last Monday
         QDate startOfWeek = current.addDays(-(current.dayOfWeek()-1));
         transactionProxyModel->setDateRange(
                 GUIUtil::StartOfDay(startOfWeek),
-                TransactionFilterProxy::MAX_DATE);
+                std::nullopt);
 
         } break;
     case ThisMonth:
         transactionProxyModel->setDateRange(
                 GUIUtil::StartOfDay(QDate(current.year(), current.month(), 1)),
-                TransactionFilterProxy::MAX_DATE);
+                std::nullopt);
         break;
     case LastMonth:
         transactionProxyModel->setDateRange(
@@ -302,7 +297,7 @@ void TransactionView::chooseDate(int idx)
     case ThisYear:
         transactionProxyModel->setDateRange(
                 GUIUtil::StartOfDay(QDate(current.year(), 1, 1)),
-                TransactionFilterProxy::MAX_DATE);
+                std::nullopt);
         break;
     case Range:
         dateRangeWidget->setVisible(true);
@@ -357,7 +352,9 @@ void TransactionView::exportClicked()
     // CSV is currently the only supported format
     QString filename = GUIUtil::getSaveFileName(this,
         tr("Export Transaction History"), QString(),
-        tr("Comma separated file", "Name of CSV file format") + QLatin1String(" (*.csv)"), nullptr);
+        /*: Expanded name of the CSV file format.
+            See: https://en.wikipedia.org/wiki/Comma-separated_values. */
+        tr("Comma separated file") + QLatin1String(" (*.csv)"), nullptr);
 
     if (filename.isNull())
         return;
@@ -424,7 +421,7 @@ void TransactionView::abandonTx()
     model->getTransactionTableModel()->updateTransaction(hashQStr, CT_UPDATED, false);
 }
 
-void TransactionView::bumpFee()
+void TransactionView::bumpFee([[maybe_unused]] bool checked)
 {
     if(!transactionView || !transactionView->selectionModel())
         return;

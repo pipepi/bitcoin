@@ -12,11 +12,12 @@
 #include <compat.h>
 #include <init.h>
 #include <interfaces/chain.h>
+#include <interfaces/init.h>
 #include <node/context.h>
 #include <node/ui_interface.h>
 #include <noui.h>
 #include <shutdown.h>
-#include <util/ref.h>
+#include <util/check.h>
 #include <util/strencodings.h>
 #include <util/system.h>
 #include <util/threadnames.h>
@@ -24,6 +25,7 @@
 #include <util/translation.h>
 #include <util/url.h>
 
+#include <any>
 #include <functional>
 #include <optional>
 
@@ -103,17 +105,15 @@ int fork_daemon(bool nochdir, bool noclose, TokenPipeEnd& endpoint)
 
 #endif
 
-static bool AppInit(int argc, char* argv[])
+static bool AppInit(NodeContext& node, int argc, char* argv[])
 {
-    NodeContext node;
-
     bool fRet = false;
 
     util::ThreadSetInternalName("init");
 
     // If Qt is used, parameters/bitcoin.conf are parsed in qt/bitcoin.cpp's main()
-    SetupServerArgs(node);
     ArgsManager& args = *Assert(node.args);
+    SetupServerArgs(args);
     std::string error;
     if (!args.ParseParameters(argc, argv, error)) {
         return InitError(Untranslated(strprintf("Error parsing command line arguments: %s\n", error)));
@@ -142,7 +142,7 @@ static bool AppInit(int argc, char* argv[])
     // end, which is interpreted as failure to start.
     TokenPipeEnd daemon_ep;
 #endif
-    util::Ref context{node};
+    std::any context{&node};
     try
     {
         if (!CheckDataDirOption()) {
@@ -223,7 +223,7 @@ static bool AppInit(int argc, char* argv[])
             // If locking the data directory failed, exit immediately
             return false;
         }
-        fRet = AppInitInterfaces(node) && AppInitMain(context, node);
+        fRet = AppInitInterfaces(node) && AppInitMain(node);
     }
     catch (const std::exception& e) {
         PrintExceptionContinue(&e, "AppInit()");
@@ -253,10 +253,18 @@ int main(int argc, char* argv[])
     util::WinCmdLineArgs winArgs;
     std::tie(argc, argv) = winArgs.get();
 #endif
+
+    NodeContext node;
+    int exit_status;
+    std::unique_ptr<interfaces::Init> init = interfaces::MakeNodeInit(node, argc, argv, exit_status);
+    if (!init) {
+        return exit_status;
+    }
+
     SetupEnvironment();
 
     // Connect bitcoind signal handlers
     noui_connect();
 
-    return (AppInit(argc, argv) ? EXIT_SUCCESS : EXIT_FAILURE);
+    return (AppInit(node, argc, argv) ? EXIT_SUCCESS : EXIT_FAILURE);
 }

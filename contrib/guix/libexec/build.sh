@@ -24,12 +24,17 @@ fi
 # Check that required environment variables are set
 cat << EOF
 Required environment variables as seen inside the container:
+    DIST_ARCHIVE_BASE: ${DIST_ARCHIVE_BASE:?not set}
+    DISTNAME: ${DISTNAME:?not set}
     HOST: ${HOST:?not set}
     SOURCE_DATE_EPOCH: ${SOURCE_DATE_EPOCH:?not set}
-    MAX_JOBS: ${MAX_JOBS:?not set}
+    JOBS: ${JOBS:?not set}
     DISTSRC: ${DISTSRC:?not set}
     OUTDIR: ${OUTDIR:?not set}
 EOF
+
+ACTUAL_OUTDIR="${OUTDIR}"
+OUTDIR="${DISTSRC}/output"
 
 #####################
 # Environment Setup #
@@ -52,16 +57,36 @@ store_path() {
 # Set environment variables to point the NATIVE toolchain to the right
 # includes/libs
 NATIVE_GCC="$(store_path gcc-toolchain)"
-export LIBRARY_PATH="${NATIVE_GCC}/lib:${NATIVE_GCC}/lib64"
-export CPATH="${NATIVE_GCC}/include"
+NATIVE_GCC_STATIC="$(store_path gcc-toolchain static)"
+
+unset LIBRARY_PATH
+unset CPATH
 unset C_INCLUDE_PATH
 unset CPLUS_INCLUDE_PATH
+unset OBJC_INCLUDE_PATH
+unset OBJCPLUS_INCLUDE_PATH
+
+export LIBRARY_PATH="${NATIVE_GCC}/lib:${NATIVE_GCC}/lib64:${NATIVE_GCC_STATIC}/lib:${NATIVE_GCC_STATIC}/lib64"
+export C_INCLUDE_PATH="${NATIVE_GCC}/include"
+export CPLUS_INCLUDE_PATH="${NATIVE_GCC}/include/c++:${NATIVE_GCC}/include"
+export OBJC_INCLUDE_PATH="${NATIVE_GCC}/include"
+export OBJCPLUS_INCLUDE_PATH="${NATIVE_GCC}/include/c++:${NATIVE_GCC}/include"
+
+prepend_to_search_env_var() {
+    export "${1}=${2}${!1:+:}${!1}"
+}
+
 case "$HOST" in
     *darwin*)
         # When targeting darwin, zlib is required by native_libdmg-hfsplus.
         zlib_store_path=$(store_path "zlib")
-        export LIBRARY_PATH="${zlib_store_path}/lib:${LIBRARY_PATH}"
-        export CPATH="${zlib_store_path}/include:${CPATH}"
+        zlib_static_store_path=$(store_path "zlib" static)
+
+        prepend_to_search_env_var LIBRARY_PATH "${zlib_static_store_path}/lib:${zlib_store_path}/lib"
+        prepend_to_search_env_var C_INCLUDE_PATH "${zlib_store_path}/include"
+        prepend_to_search_env_var CPLUS_INCLUDE_PATH "${zlib_store_path}/include"
+        prepend_to_search_env_var OBJC_INCLUDE_PATH "${zlib_store_path}/include"
+        prepend_to_search_env_var OBJCPLUS_INCLUDE_PATH "${zlib_store_path}/include"
 esac
 
 # Set environment variables to point the CROSS toolchain to the right
@@ -122,7 +147,7 @@ case "$HOST" in
         #
         # After the native packages in depends are built, the ld wrapper should
         # no longer affect our build, as clang would instead reach for
-        # x86_64-apple-darwin18-ld from cctools
+        # x86_64-apple-darwin19-ld from cctools
         ;;
     *) export GUIX_LD_WRAPPER_DISABLE_RPATH=yes ;;
 esac
@@ -153,8 +178,6 @@ case "$HOST" in
 esac
 
 # Environment variables for determinism
-export QT_RCC_TEST=1
-export QT_RCC_SOURCE_DATE_OVERRIDE=1
 export TAR_OPTIONS="--owner=0 --group=0 --numeric-owner --mtime='@${SOURCE_DATE_EPOCH}' --sort=name"
 export TZ="UTC"
 case "$HOST" in
@@ -173,7 +196,7 @@ esac
 ####################
 
 # Build the depends tree, overriding variables that assume multilib gcc
-make -C depends --jobs="$MAX_JOBS" HOST="$HOST" \
+make -C depends --jobs="$JOBS" HOST="$HOST" \
                                    ${V:+V=1} \
                                    ${SOURCES_PATH+SOURCES_PATH="$SOURCES_PATH"} \
                                    ${BASE_CACHE+BASE_CACHE="$BASE_CACHE"} \
@@ -191,6 +214,7 @@ make -C depends --jobs="$MAX_JOBS" HOST="$HOST" \
                                    x86_64_linux_NM=x86_64-linux-gnu-nm \
                                    x86_64_linux_STRIP=x86_64-linux-gnu-strip \
                                    qt_config_opts_i686_linux='-platform linux-g++ -xplatform bitcoin-linux-g++' \
+                                   qt_config_opts_x86_64_linux='-platform linux-g++ -xplatform bitcoin-linux-g++' \
                                    FORCE_USE_SYSTEM_CLANG=1
 
 
@@ -198,17 +222,15 @@ make -C depends --jobs="$MAX_JOBS" HOST="$HOST" \
 # Source Tarball Building #
 ###########################
 
-# Define DISTNAME variable.
-# shellcheck source=contrib/gitian-descriptors/assign_DISTNAME
-source contrib/gitian-descriptors/assign_DISTNAME
-
-GIT_ARCHIVE="${OUTDIR}/src/${DISTNAME}.tar.gz"
+GIT_ARCHIVE="${DIST_ARCHIVE_BASE}/${DISTNAME}.tar.gz"
 
 # Create the source tarball if not already there
 if [ ! -e "$GIT_ARCHIVE" ]; then
     mkdir -p "$(dirname "$GIT_ARCHIVE")"
     git archive --prefix="${DISTNAME}/" --output="$GIT_ARCHIVE" HEAD
 fi
+
+mkdir -p "$OUTDIR"
 
 ###########################
 # Binary Tarball Building #
@@ -217,7 +239,7 @@ fi
 # CONFIGFLAGS
 CONFIGFLAGS="--enable-reduce-exports --disable-bench --disable-gui-tests --disable-fuzz-binary"
 case "$HOST" in
-    *linux*) CONFIGFLAGS+=" --enable-glibc-back-compat" ;;
+    *linux*) CONFIGFLAGS+=" --disable-threadlocal" ;;
 esac
 
 # CFLAGS
@@ -231,14 +253,25 @@ esac
 # CXXFLAGS
 HOST_CXXFLAGS="$HOST_CFLAGS"
 
+case "$HOST" in
+    arm-linux-gnueabihf) HOST_CXXFLAGS="${HOST_CXXFLAGS} -Wno-psabi" ;;
+esac
+
 # LDFLAGS
 case "$HOST" in
     *linux*)  HOST_LDFLAGS="-Wl,--as-needed -Wl,--dynamic-linker=$glibc_dynamic_linker -static-libstdc++ -Wl,-O2" ;;
     *mingw*)  HOST_LDFLAGS="-Wl,--no-insert-timestamp" ;;
 esac
 
+# Using --no-tls-get-addr-optimize retains compatibility with glibc 2.17, by
+# avoiding a PowerPC64 optimisation available in glibc 2.22 and later.
+# https://sourceware.org/binutils/docs-2.35/ld/PowerPC64-ELF64.html
 case "$HOST" in
-    powerpc64-linux-*) HOST_LDFLAGS="${HOST_LDFLAGS} -Wl,-z,noexecstack" ;;
+    *powerpc64*) HOST_LDFLAGS="${HOST_LDFLAGS} -Wl,--no-tls-get-addr-optimize" ;;
+esac
+
+case "$HOST" in
+    powerpc64-linux-*|riscv64-linux-*) HOST_LDFLAGS="${HOST_LDFLAGS} -Wl,-z,noexecstack" ;;
 esac
 
 # Make $HOST-specific native binaries from depends available in $PATH
@@ -267,13 +300,16 @@ mkdir -p "$DISTSRC"
     sed -i.old 's/-lstdc++ //g' config.status libtool src/univalue/config.status src/univalue/libtool
 
     # Build Bitcoin Core
-    make --jobs="$MAX_JOBS" ${V:+V=1}
+    make --jobs="$JOBS" ${V:+V=1}
 
-    # Perform basic ELF security checks on a series of executables.
+    # Check that symbol/security checks tools are sane.
+    make test-security-check ${V:+V=1}
+    # Perform basic security checks on a series of executables.
     make -C src --jobs=1 check-security ${V:+V=1}
-    # Check that executables only contain allowed gcc, glibc and libstdc++
-    # version symbols for Linux distro back-compatibility.
+    # Check that executables only contain allowed version symbols.
     make -C src --jobs=1 check-symbols  ${V:+V=1}
+
+    mkdir -p "$OUTDIR"
 
     # Make the os-specific installers
     case "$HOST" in
@@ -306,9 +342,6 @@ mkdir -p "$DISTSRC"
                 osx_volname \
                 contrib/macdeploy/detached-sig-{apply,create}.sh \
                 "${BASEPREFIX}/${HOST}"/native/bin/dmg
-            for util in codesign_allocate pagestuff; do
-                cp --no-target-directory {"${BASEPREFIX}/${HOST}/native/bin/${HOST}-","unsigned-app-${HOST}/"}"$util"
-            done
             mv --target-directory="unsigned-app-${HOST}" dist
             (
                 cd "unsigned-app-${HOST}"
@@ -344,7 +377,7 @@ mkdir -p "$DISTSRC"
                 {
                     find "${DISTNAME}/bin" -type f -executable -print0
                     find "${DISTNAME}/lib" -type f -print0
-                } | xargs -0 -n1 -P"$MAX_JOBS" -I{} "${DISTSRC}/contrib/devtools/split-debug.sh" {} {} {}.dbg
+                } | xargs -0 -n1 -P"$JOBS" -I{} "${DISTSRC}/contrib/devtools/split-debug.sh" {} {} {}.dbg
                 ;;
         esac
 
@@ -390,25 +423,40 @@ mkdir -p "$DISTSRC"
                 find "${DISTNAME}" -print0 \
                     | sort --zero-terminated \
                     | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST//x86_64-apple-darwin18/osx64}.tar.gz" \
-                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-apple-darwin18/osx64}.tar.gz" && exit 1 )
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-${HOST//x86_64-apple-darwin19/osx64}.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-${HOST//x86_64-apple-darwin19/osx64}.tar.gz" && exit 1 )
                 ;;
         esac
-    )
-)
+    )  # $DISTSRC/installed
 
-case "$HOST" in
-    *mingw*)
-        cp -rf --target-directory=. contrib/windeploy
-        (
-            cd ./windeploy
-            mkdir unsigned
-            cp --target-directory=unsigned/ "${OUTDIR}/${DISTNAME}-win64-setup-unsigned.exe"
-            find . -print0 \
-                | sort --zero-terminated \
-                | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
-                | gzip -9n > "${OUTDIR}/${DISTNAME}-win-unsigned.tar.gz" \
-                || ( rm -f "${OUTDIR}/${DISTNAME}-win-unsigned.tar.gz" && exit 1 )
-        )
-        ;;
-esac
+    case "$HOST" in
+        *mingw*)
+            cp -rf --target-directory=. contrib/windeploy
+            (
+                cd ./windeploy
+                mkdir -p unsigned
+                cp --target-directory=unsigned/ "${OUTDIR}/${DISTNAME}-win64-setup-unsigned.exe"
+                find . -print0 \
+                    | sort --zero-terminated \
+                    | tar --create --no-recursion --mode='u+rw,go+r-w,a+X' --null --files-from=- \
+                    | gzip -9n > "${OUTDIR}/${DISTNAME}-win-unsigned.tar.gz" \
+                    || ( rm -f "${OUTDIR}/${DISTNAME}-win-unsigned.tar.gz" && exit 1 )
+            )
+            ;;
+    esac
+)  # $DISTSRC
+
+rm -rf "$ACTUAL_OUTDIR"
+mv --no-target-directory "$OUTDIR" "$ACTUAL_OUTDIR" \
+    || ( rm -rf "$ACTUAL_OUTDIR" && exit 1 )
+
+(
+    cd /outdir-base
+    {
+        echo "$GIT_ARCHIVE"
+        find "$ACTUAL_OUTDIR" -type f
+    } | xargs realpath --relative-base="$PWD" \
+      | xargs sha256sum \
+      | sort -k2 \
+      | sponge "$ACTUAL_OUTDIR"/SHA256SUMS.part
+)

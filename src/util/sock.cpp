@@ -10,11 +10,13 @@
 #include <util/system.h>
 #include <util/time.h>
 
-#include <codecvt>
-#include <cwchar>
-#include <locale>
 #include <stdexcept>
 #include <string>
+
+#ifdef WIN32
+#include <codecvt>
+#include <locale>
+#endif
 
 #ifdef USE_POLL
 #include <poll.h>
@@ -64,6 +66,16 @@ ssize_t Sock::Send(const void* data, size_t len, int flags) const
 ssize_t Sock::Recv(void* buf, size_t len, int flags) const
 {
     return recv(m_socket, static_cast<char*>(buf), len, flags);
+}
+
+int Sock::Connect(const sockaddr* addr, socklen_t addr_len) const
+{
+    return connect(m_socket, addr, addr_len);
+}
+
+int Sock::GetSockOpt(int level, int opt_name, void* opt_val, socklen_t* opt_len) const
+{
+    return getsockopt(m_socket, level, opt_name, static_cast<char*>(opt_val), opt_len);
 }
 
 bool Sock::Wait(std::chrono::milliseconds timeout, Event requested, Event* occurred) const
@@ -169,7 +181,7 @@ void Sock::SendComplete(const std::string& data,
         // Wait for a short while (or the socket to become ready for sending) before retrying
         // if nothing was sent.
         const auto wait_time = std::min(deadline - now, std::chrono::milliseconds{MAX_WAIT_FOR_IO});
-        Wait(wait_time, SEND);
+        (void)Wait(wait_time, SEND);
     }
 }
 
@@ -252,7 +264,7 @@ std::string Sock::RecvUntilTerminator(uint8_t terminator,
 
         // Wait for a short while (or the socket to become ready for reading) before retrying.
         const auto wait_time = std::min(deadline - now, std::chrono::milliseconds{MAX_WAIT_FOR_IO});
-        Wait(wait_time, RECV);
+        (void)Wait(wait_time, RECV);
     }
 }
 

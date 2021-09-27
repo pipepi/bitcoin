@@ -24,9 +24,9 @@ public:
     bool AddTx(const CTransactionRef& tx, NodeId peer) EXCLUSIVE_LOCKS_REQUIRED(g_cs_orphans);
 
     /** Check if we already have an orphan transaction (by txid or wtxid) */
-    bool HaveTx(const GenTxid& gtxid) const EXCLUSIVE_LOCKS_REQUIRED(!g_cs_orphans);
+    bool HaveTx(const GenTxid& gtxid) const LOCKS_EXCLUDED(::g_cs_orphans);
 
-    /** Get an orphan transaction and its orginating peer
+    /** Get an orphan transaction and its originating peer
      * (Transaction ref will be nullptr if not found)
      */
     std::pair<CTransactionRef, NodeId> GetTx(const uint256& txid) const EXCLUSIVE_LOCKS_REQUIRED(g_cs_orphans);
@@ -38,7 +38,7 @@ public:
     void EraseForPeer(NodeId peer) EXCLUSIVE_LOCKS_REQUIRED(g_cs_orphans);
 
     /** Erase all orphans included in or invalidated by a new block */
-    void EraseForBlock(const CBlock& block) EXCLUSIVE_LOCKS_REQUIRED(!g_cs_orphans);
+    void EraseForBlock(const CBlock& block) LOCKS_EXCLUDED(::g_cs_orphans);
 
     /** Limit the orphanage to the given maximum */
     unsigned int LimitOrphans(unsigned int max_orphans) EXCLUSIVE_LOCKS_REQUIRED(g_cs_orphans);
@@ -46,6 +46,13 @@ public:
     /** Add any orphans that list a particular tx as a parent into a peer's work set
      * (ie orphans that may have found their final missing parent, and so should be reconsidered for the mempool) */
     void AddChildrenToWorkSet(const CTransaction& tx, std::set<uint256>& orphan_work_set) const EXCLUSIVE_LOCKS_REQUIRED(g_cs_orphans);
+
+    /** Return how many entries exist in the orphange */
+    size_t Size() LOCKS_EXCLUDED(::g_cs_orphans)
+    {
+        LOCK(::g_cs_orphans);
+        return m_orphans.size();
+    }
 
 protected:
     struct OrphanTx {
